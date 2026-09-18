@@ -8,10 +8,10 @@ It is for us, not the grader: only `robot.py` (renamed to our team id) is submit
 | | wall follower (start) | final robot |
 |---|---|---|
 | practice mazes | 282 / 400 | **376 / 400** (p02, p03 perfect) |
-| hard: practice mazes with range 1, 10% noise, jitter | 150 / 400 | **204 / 400** |
+| hard: practice mazes with range 1, 10% noise, jitter | 150 / 400 | **206 / 400** |
 | benchmark: solved | 174 / 190 | **190 / 190** |
-| benchmark: wall hits | 151 | **54** |
-| benchmark: total score (190 mazes) | 6027 | **6639 (+10%)** |
+| benchmark: wall hits | 151 | **53** |
+| benchmark: total score (190 mazes) | 6027 | **6629 (+10%)** |
 | slowest thinking on a 61x61 maze | -- | ~6 s of the 30 s allowed |
 
 Honest reading: the big wins are **reliability** (the wall follower fails 16 of 190 mazes = 16 zeros; we fail none)
@@ -87,6 +87,7 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 10 | *tried, reverted:* "goal must be a dead end" rule | 352 | 204 | 99/100, 87.7 | 39/40, 105.1 | 62 |
 | 11 | speed: 5x faster, identical decisions | 376 | 204 | unchanged | unchanged | unchanged |
 | 12 | safety net: never crash | 376 | 204 | unchanged | unchanged | unchanged |
+| 13 | code-review fixes (correct pocket bound, etc.) | 376 | 206 (20/20) | 100/100, 93.0, 33.9 | 40/40, 110.7, 43.6 | 53 |
 
 From #7 on the benchmark also has the farthest-by-ticks set. For #6 it reads: 50/50 solved, 128.3 extra ticks, score 29.9.
 
@@ -443,3 +444,47 @@ the start). That's a strategy, not hard-coded moves. The robot still decides eve
 and if the pattern doesn't hold it falls back to exploring everything. On the random-goal benchmark set, where the
 pattern is false on purpose, it still solves 40/40. If the hidden mazes don't follow the pattern, we lose some
 efficiency, not correctness. The mock round will tell us which: compare the random-goal-like mazes' scores there.
+
+---
+
+## #13 Code-review fixes
+
+A line-by-line review of `robot.py` (the only submitted file) after #12. It found:
+
+1. **(Important) The "walled-in pocket" rule wasn't actually a proof.** In `_could_be_goal`, a pocket of unknown cells
+   was dismissed if `entrance + size < beat`, using the pocket's *closest* entrance. But hidden walls can split a
+   pocket, so its far half may only be reachable through a *farther* entrance. The goal could hide there and be ruled
+   out wrongly. The robot wouldn't get stuck (the fallback explores everything), but it would waste a whole
+   exploration pass first.
+   **Fix:** use the *farthest* entrance. Whatever route reaches a cell inside, it enters the pocket for the last
+   time from one of the entrances, so `farthest entrance + size` really is an upper bound. And if an open neighbour
+   of the pocket isn't reachable yet, its distance is unknown, so the pocket stays a candidate.
+2. **(Minor) The viewer showed some cells as "ruled out" that weren't.** An open cell seen but not yet reachable has no
+   known distance, so it can't be ruled out. Display only: the route search can't reach such a cell anyway.
+3. **(Minor) Worst-case thinking time.** When the map looks fully explored with no goal, the doubtful-wall search
+   widened its net one step at a time, up to 50 searches in one tick. On a huge maze that could approach the
+   0.5 s limit. **Fix:** double the net (1, 2, 4 ... 64): at most 7 searches.
+4. **(Minor) Wrong reason text.** While re-checking a doubtful wall, the Why line said "tied votes". Now it says
+   "a doubtful wall is in view".
+
+Checked and fine: the protected block is byte-identical, the only `print` goes to stderr, every return is one of the
+4 legal actions, nothing heavy at import, no crash paths found (every dictionary lookup that could miss is guarded,
+and the safety net covers the rest).
+
+- **Result:** 55 of the 214 fingerprint runs took a different path, costing 243 more ticks in total (+0.6%).
+  No run became unsolved.
+
+| suite | before (#12) | after (#13) |
+|---|---|---|
+| practice | 376 | 376 |
+| hard | 204 | 206 |
+| bench total (190 mazes) | 6639 | 6629 |
+| bench far / ticks-far / random: extra ticks | 91.8 / 128.3 / 116.6 | 93.0 / 137.2 / 110.7 |
+| 61x61 maze thinking time | 5.9 s | 6.0 s |
+
+- **What we learned:** the wrong rule was sometimes "right by luck": it ruled out pockets that happened not to hold
+  the goal. The correct rule costs 0.6% ticks on our benchmark, which is within noise. But on a hidden maze where the
+  wrong rule dismisses the goal's own pocket, the robot would explore the entire rest of the maze first, costing far
+  more than 0.6%.
+- **Verdict:** kept, for correctness. The log's claim that ruled-out cells "provably can't be the goal" is now true
+  (given a correct map).

@@ -164,7 +164,8 @@ def _could_be_goal(memory):
       at_least:       pretending every unknown cell is open. The real distance can only be this or longer.
     Some open cell is at least `beat` = max(at_least) away, so the goal is at least that far. A cell whose
     shortest_known route is shorter than that (minus SLACK) can't be the goal -- skip it.
-    A pocket of unknown cells walled in on all sides can't hide anything farther than its entrance + its size.
+    A pocket of unknown cells walled in on all sides can't hide anything farther than its farthest entrance +
+    its size: whatever route reaches a cell inside, it last enters the pocket from one of those entrances.
     Returns (candidate cells, candidate unknown cells, beat, at_least).
     """
     known = memory["known"]
@@ -177,13 +178,14 @@ def _could_be_goal(memory):
     shortest_known = _bfs(known)
     beat = max(at_least.get(c, 0) for c, v in known.items() if v) - SLACK
 
-    cells = {c for c, d in shortest_known.items() if d >= beat and c not in memory["visited"]}
+    cells = {c for c, v in known.items() if v and c not in memory["visited"]
+             and shortest_known.get(c, beat) >= beat}  # not reachable yet = distance unknown = still possible
     unknown, seen = set(), set()
     for y in range(y0, y1 + 1):
         for x in range(x0, x1 + 1):
             if (x, y) in seen or (x, y) in known:
                 continue
-            pocket, stack, open_edge, entrance = [], [(x, y)], False, None
+            pocket, stack, open_edge, entrance = [], [(x, y)], False, 0
             seen.add((x, y))
             while stack:
                 c = stack.pop()
@@ -191,12 +193,15 @@ def _could_be_goal(memory):
                 for n in ((c[0], c[1] - 1), (c[0] + 1, c[1]), (c[0], c[1] + 1), (c[0] - 1, c[1])):
                     if not inside(n):
                         open_edge = True  # reaches past everything we know: could be any size
-                    elif n in shortest_known:
-                        entrance = min(entrance, shortest_known[n]) if entrance is not None else shortest_known[n]
+                    elif known.get(n) is True:
+                        if n in shortest_known:
+                            entrance = max(entrance, shortest_known[n])
+                        else:
+                            open_edge = True  # an open neighbour we can't reach yet: its distance is unbounded
                     elif n not in known and n not in seen:
                         seen.add(n)
                         stack.append(n)
-            if open_edge or entrance is None or entrance + len(pocket) >= beat:
+            if open_edge or entrance + len(pocket) >= beat:
                 unknown.update(pocket)
     return cells, unknown, beat, at_least
 
@@ -369,14 +374,15 @@ def _explore(sensors, memory):
     while actions is None and doubt < 50:
         # Everything reachable is explored and still no goal: noise must have faked a wall somewhere.
         # Re-check the walls we are least sure about; widen the net if that finds nothing.
-        doubt = memory["doubt"] = max(doubt + 1, memory.get("doubt", 1))
+        doubt = memory["doubt"] = max(doubt * 2, memory.get("doubt", 1))  # 1, 2, 4 ... 64: at most 7 searches
         actions = _route(memory, sees(_watchers(memory, doubt)))
         reason = "map explored, no goal -> re-checking a doubtful wall"
     actions = actions or []
     memory["plan"] = _cells_along(memory, actions)
     if not actions:
         action = "wait"
-        memory["why"] = "a cell in view is uncertain (tied votes) -> wait one tick for a fresh reading"
+        memory["why"] = ("a doubtful wall is in view -> wait one tick for a fresh reading" if doubt else
+                         "a cell in view is uncertain (tied votes) -> wait one tick for a fresh reading")
     else:
         action = actions[0]
         n = len(actions)
