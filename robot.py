@@ -74,11 +74,15 @@ def decide(sensors, memory):
 
     if sensors["dist_right"] > 0 and not turned_right_last_tick:
         memory["turned_right"] = True
+        memory["why"] = "right side open -> turn right (right-hand rule)"
         return "turn_right"
 
     if sensors["dist_front"] > 0:
+        memory["why"] = ("just turned right, so drive into the opening" if turned_right_last_tick
+                         else "right is a wall, front is open -> keep following the wall")
         return "forward"
 
+    memory["why"] = "right and front blocked -> turn left"
     return "turn_left"
 
 
