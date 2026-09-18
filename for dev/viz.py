@@ -22,6 +22,7 @@ Cells are in the robot's own frame: start = (0, 0), heading 0 = N, 1 = E, 2 = S,
 """
 
 import argparse
+import dataclasses
 import importlib.util
 import sys
 import time
@@ -56,6 +57,27 @@ def shortest(maze):
                 dist[n] = dist[((x, y), h)] + 1
                 queue.append(n)
     return None
+
+
+def ticks_to_cells(maze):
+    """Fewest ticks (counting turns) from the start to every reachable cell."""
+    start = (maze.start, maze.start_heading)
+    dist = {start: 0}
+    queue = deque([start])
+    while queue:
+        (x, y), h = queue.popleft()
+        dx, dy = S.DELTA[h]
+        nexts = [((x, y), S.turn(h, "left")), ((x, y), S.turn(h, "right"))]
+        if maze.is_open(x + dx, y + dy):
+            nexts.append(((x + dx, y + dy), h))
+        for n in nexts:
+            if n not in dist:
+                dist[n] = dist[((x, y), h)] + 1
+                queue.append(n)
+    best = {}
+    for (cell, _), d in dist.items():
+        best[cell] = min(best.get(cell, d), d)
+    return best
 
 
 def score(solved, ticks, best, hits):
@@ -193,7 +215,6 @@ def text_line(f):
 
 def hard_mode(robot_path, seeds=5):
     """Practice mazes re-run with the hidden set's worst sensors: range 1, 10% noise, jitter, several noise seeds."""
-    import dataclasses
     print(f"{'maze':<6}{'solved':>8}{'avg ticks':>11}{'shortest':>10}{'wall hits':>11}{'avg score':>11}")
     total = 0
     for p in maze_files():
@@ -210,7 +231,8 @@ def hard_mode(robot_path, seeds=5):
 def gen_maze(seed, goal="far"):
     """A random maze in the practice mazes' style: odd grid, border walls, start at (1, 1).
 
-    goal="far":  goal on the cell farthest from the start (true of all 4 practice mazes)
+    goal="far":  goal on the cell farthest from the start in steps (true of all 4 practice mazes)
+    goal="tfar": goal on the cell farthest in ticks, counting turns (also true of all 4 -- we can't tell which)
     goal="rand": goal on a random open cell -- checks we don't break when that pattern doesn't hold
     """
     import random
@@ -251,11 +273,18 @@ def gen_maze(seed, goal="far"):
                 dist[n] = dist[(x, y)] + 1
                 queue.append(n)
     cells = sorted(dist)
-    target = max(cells, key=dist.get) if goal == "far" else rng.choice(cells[1:])
+    target = rng.choice(cells[1:]) if goal == "rand" else None  # drawn first: keeps older benchmark mazes identical
+    heading = rng.choice("NESW")
+    m = S.Maze(name=f"{goal}{seed}", rows=["".join(r) for r in g], start=(1, 1), goal=(1, 1),
+               start_heading=heading, seed=seed, sensor_range=rng.choice([1, 1, 2, 2, 3, 4]),
+               noise=rng.choice([0.0, 0.0, 0.05, 0.1]), encoder_jitter=rng.random() < 0.5)
+    if goal == "far":
+        target = max(cells, key=dist.get)
+    elif goal == "tfar":
+        ticks = ticks_to_cells(m)
+        target = max(cells, key=ticks.get)
     g[1][1], g[target[1]][target[0]] = "S", "G"
-    return S.Maze(name=f"{goal}{seed}", rows=["".join(r) for r in g], start=(1, 1), goal=target,
-                  start_heading=rng.choice("NESW"), seed=seed, sensor_range=rng.choice([1, 1, 2, 2, 3, 4]),
-                  noise=rng.choice([0.0, 0.0, 0.05, 0.1]), encoder_jitter=rng.random() < 0.5)
+    return dataclasses.replace(m, rows=["".join(r) for r in g], goal=target)
 
 
 def maze_text(m):
@@ -271,18 +300,19 @@ def _bench_one(job):
         "maze": m.name, "range": m.sensor_range, "noise": m.noise, "text": maze_text(m)}
 
 
-def bench_mode(robot_path, n_far=100, n_rand=40):
+def bench_mode(robot_path, n_far=100, n_rand=40, n_tfar=50):
     """Score the robot on generated mazes. Worst few are saved to 'for dev/mazes/' so the GUI can replay them."""
     import multiprocessing
-    jobs = [(robot_path, s, "far") for s in range(n_far)] + [(robot_path, 10000 + s, "rand") for s in range(n_rand)]
+    jobs = [(robot_path, s, "far") for s in range(n_far)] + [(robot_path, 10000 + s, "rand") for s in range(n_rand)] + [(robot_path, 20000 + s, "tfar") for s in range(n_tfar)]
     with multiprocessing.Pool() as pool:
         res = pool.map(_bench_one, jobs)
-    print(f"{'set':<22}{'mazes':>6}{'solved':>8}{'wall hits':>11}{'avg extra ticks':>17}{'avg score':>11}{'slowest ms':>12}")
+    print(f"{'set':<24}{'mazes':>6}{'solved':>8}{'wall hits':>11}{'avg extra ticks':>17}{'avg score':>11}{'slowest ms':>12}")
     for label, rows in (("goal = farthest cell", [r for r in res if r["maze"].startswith("far")]),
+                        ("goal = farthest (ticks)", [r for r in res if r["maze"].startswith("tfar")]),
                         ("goal = random cell", [r for r in res if r["maze"].startswith("rand")])):
         solved = [r for r in rows if r["solved"]]
         extra = sum(r["ticks"] - r["best"] for r in solved) / max(1, len(solved))
-        print(f"{label:<22}{len(rows):>6}{len(solved):>8}{sum(r['hits'] for r in rows):>11}{extra:>17.1f}"
+        print(f"{label:<24}{len(rows):>6}{len(solved):>8}{sum(r['hits'] for r in rows):>11}{extra:>17.1f}"
               f"{sum(r['score'] for r in rows) / len(rows):>11.1f}{max(r['slowest'] for r in rows):>12.2f}")
     far = [r for r in res if r["maze"].startswith("far")]
     print("farthest-goal set, avg score by sensor range: " + "  ".join(
@@ -621,7 +651,7 @@ def main():
     ap.add_argument("--hard", action="store_true",
                     help="no GUI: practice mazes with range-1 sensors, 10%% noise and jitter, 5 noise seeds each")
     ap.add_argument("--bench", action="store_true",
-                    help="no GUI: 100 generated mazes with the goal on the farthest cell + 40 with a random goal")
+                    help="no GUI: 190 generated mazes -- goal farthest in steps (100), in ticks (50), random (40)")
     args = ap.parse_args()
     robot_path = Path(args.robot).resolve()
     if args.bench:

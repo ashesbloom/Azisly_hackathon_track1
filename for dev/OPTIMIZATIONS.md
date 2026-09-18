@@ -42,6 +42,8 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 
 - **Farthest-goal set (100 mazes):** goal on the cell farthest from the start. **All 4 practice mazes are built this way**
   (checked: in each one the goal is the single farthest cell, and a dead end). The hidden mazes very likely are too.
+- **Farthest-by-ticks set (50 mazes, added at #7):** goal on the cell farthest when turns are counted too. The practice
+  mazes fit both "farthest in steps" and "farthest in ticks", so we test both.
 - **Random-goal set (40 mazes):** goal on a random cell. A safety check, so we notice if a change only works when
   the goal is far away.
 - **Avg extra ticks** (our ticks minus the shortest possible) is the number to push down. Big mazes cost so many exploring
@@ -59,6 +61,9 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 4 | skip cells that can't be the goal (farthest-cell rule) | 370 | 187 (20/20) | 100/100, 95.6, 27.6 | 38/40, 98.3, 42.5 | 36 |
 | 5 | prefer deeper targets (W = 0.25) | 370 | 197 (20/20) | 100/100, **89.7, 32.8** | 40/40, 112.4, 41.2 | 44 |
 | 6 | on a tie, turn toward the more open side | **376** | **204** (20/20) | 100/100, 91.8, **34.0** | 40/40, 116.6, **43.6** | 45 |
+| 7 | *tried, reverted:* drop the 3-step margin | 352 | 218 | 99/100, 96.2, 34.1 | 40/40, 116.5, 44.6 | 49 |
+
+From #7 on the benchmark also has the farthest-by-ticks set. For #6 it reads: 50/50 solved, 128.3 extra ticks, score 29.9.
 
 Use `python3.11`. The macOS system `python3` (3.9, Tk 8.5) freezes any window, including the kit's `play.py`.
 The grader runs 3.11+ anyway.
@@ -272,3 +277,24 @@ The grader runs 3.11+ anyway.
   41.2 -> 43.6, though farthest-goal extra ticks moved 89.7 -> 91.8. That's within the benchmark's noise: a tiny change
   early in a run changes everything after it, sometimes for the better and sometimes worse.
 - **Verdict:** kept. Free, and it helps where it's aimed.
+
+---
+
+## #7 (tried, reverted) Drop the 3-step safety margin from the farthest-cell rule
+
+- **Idea:** SLACK = 3 keeps cells up to 3 steps short of the deepest known point as candidates, so some get visited
+  for nothing. Instead of a fixed margin, rule a cell out only if it can't be the farthest under **both** definitions:
+  steps, and ticks-with-turns (a second pair of searches over (cell, heading)).
+- **To test it fairly** we added the farthest-by-ticks set to `--bench`. That tooling stays.
+- **Result:**
+
+| variant | practice | hard | bench far: extra ticks | bench ticks-far: extra ticks | unsolved |
+|---|---|---|---|---|---|
+| **current: steps + SLACK 3** | **376** | 204 | 91.8 | 128.3 | 0 |
+| both definitions, no slack | 352 | 218 | 96.2 | 130.5 | 1 |
+| steps only, no slack (unsafe) | 352 | -- | 89.9 | 129.6 | 2 |
+
+- **What we learned:** the margin isn't just insurance, it also helps. Ruling cells out more aggressively made the
+  robot skip cells next to its path that were cheap to grab right then, and later the fallback walked back for them.
+  Practice dropped 24 points. The two-definition check also cost more thinking time (slowest tick 120 ms vs ~20).
+- **Verdict:** reverted. `robot.py` is identical to #6.
