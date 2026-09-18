@@ -3,6 +3,16 @@
 This file records every change to `robot.py`, why it was made, and what it did to the score.
 It is for us, not the grader: only `robot.py` (renamed to our team id) is submitted.
 
+```
+python3.11 "for dev/viz.py"               # the viewer: pick a maze, Run, step through with ← →
+python3.11 "for dev/viz.py" --text        # score table for all 4 practice mazes
+python3.11 "for dev/viz.py" --text p01    # every tick of p01 with the robot's reason
+python3.11 "for dev/viz.py" --hard        # the same mazes with worst-case sensors
+python3.11 play.py                        # the kit's own viewer (works now too)
+python3.11 selftest.py robot.py           # the check to run before uploading
+
+```
+
 ## The rules that matter
 
 - **Score per maze:** `max(10, 100 - 2 x (our ticks - shortest possible) - 5 x wall hits)`. An unsolved maze scores 0.
@@ -20,8 +30,30 @@ It is for us, not the grader: only `robot.py` (renamed to our team id) is submit
 python3.11 "for dev/viz.py" --text          # score table, all practice mazes
 python3.11 "for dev/viz.py" --text p02      # tick-by-tick log with the robot's reasons
 python3.11 "for dev/viz.py"                 # GUI: step through, hover anything for an explanation
+python3.11 "for dev/viz.py" --bench         # 140 generated mazes -- the main number we optimise
 python3.11 selftest.py robot.py             # submission plumbing check -- run before every upload
 ```
+
+### Why a benchmark, and what's in it
+
+4 practice mazes are too few to tune on: a change can win on them by luck and lose on the hidden set.
+`--bench` generates 140 mazes in the practice mazes' style (odd grid, border walls, start at (1,1)), with sizes
+9x9 to 31x31, some with loops, some with open chambers, sensor range 1-4, noise 0-10%, jitter on/off.
+
+- **Farthest-goal set (100 mazes):** goal on the cell farthest from the start. **All 4 practice mazes are built this way**
+  (checked: in each one the goal is the single farthest cell, and a dead end). The hidden mazes very likely are too.
+- **Random-goal set (40 mazes):** goal on a random cell. A safety check, so we notice if a change only works when
+  the goal is far away.
+- **Avg extra ticks** (our ticks minus the shortest possible) is the number to push down. Big mazes cost so many exploring
+  ticks that many land on the 10-point floor, which hides progress in the score column.
+- The 6 worst mazes of each run are saved to `for dev/mazes/` (not committed) and show up in the GUI's maze list.
+
+## Scoreboard
+
+| # | change | practice /400 | hard /400 | bench far: solved, extra ticks, score | bench random: solved, extra ticks, score | bench wall hits |
+|---|---|---|---|---|---|---|
+| 0 | wall follower | 282 | 150 | 96/100, 85.2, 30.8 | 32/40, 86.9, 41.8 | 112 |
+| 1 | explorer (nearest unvisited) | 304 | 173 | 98/100, 135.5, 26.5 | 39/40, 101.1, 44.5 | 178 |
 
 Use `python3.11`. The macOS system `python3` (3.9, Tk 8.5) freezes any window, including the kit's `play.py`.
 The grader runs 3.11+ anyway.
@@ -93,3 +125,6 @@ The grader runs 3.11+ anyway.
     drive into a wall (seen at `--text` on p03 with range 1, tick 10). Another wrong reading can hide an open cell and strand it.
     3 of 20 hard runs never reached the goal = 0 points each. The wall follower is dumber but never stranded.
 - **Verdict:** kept as the base. Higher total, but it is **not yet safe on noisy mazes**. That's the first thing to fix.
+- **Later, on the 140-maze benchmark** (added after this entry): the explorer is *worse* than the wall follower on the
+  farthest-goal set (135.5 vs 85.2 extra ticks). On big mazes "nearest unvisited cell" zig-zags: it leaves a branch half
+  done, goes elsewhere, and walks back later. The wall follower is a depth-first search -- it finishes a branch before the next.

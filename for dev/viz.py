@@ -5,6 +5,7 @@ Dev viewer for the maze robot. NOT part of the submission -- only robot.py is up
     python3.11 "for dev/viz.py" --text        # score table for every practice maze
     python3.11 "for dev/viz.py" --text p02    # tick-by-tick log for one maze
     python3.11 "for dev/viz.py" --hard        # same mazes with worst-case sensors (range 1, noise, jitter)
+    python3.11 "for dev/viz.py" --bench       # 140 generated mazes -- the main score to optimise
     python3.11 "for dev/viz.py" team17.py --text # test a different robot file
 
 Use python3.11: the macOS system python3 (Tk 8.5) freezes any window.
@@ -93,7 +94,7 @@ def snapshot(maze, memory):
     return out
 
 
-def simulate(robot_path, maze):
+def simulate(robot_path, maze, record=True):
     """Mirror of sim_lite.run, but in-process so we can read memory every tick."""
     best = shortest(maze)
     cap = 6 * best + 300
@@ -110,12 +111,12 @@ def simulate(robot_path, maze):
                  "action": None, "collided": False, "ms": 0.0, "hits": hits}
         if (x, y) == maze.goal:
             solved = True
-            frame.update(snapshot(maze, memory), why="reached the goal -- run ends here")
+            frame.update(snapshot(maze, memory) if record else {}, why="reached the goal -- run ends here")
             frames.append(frame)
             break
         if tick >= cap:
             problem = f"tick cap: no goal after {cap} ticks (final limit = 6 x shortest + 300)"
-            frame.update(snapshot(maze, memory), why=problem)
+            frame.update(snapshot(maze, memory) if record else {}, why=problem)
             frames.append(frame)
             break
 
@@ -124,14 +125,14 @@ def simulate(robot_path, maze):
             action = decide(packet, memory)
         except Exception:
             problem = "decide() crashed: " + traceback.format_exc().strip().splitlines()[-1]
-            frame.update(snapshot(maze, memory), why=problem)
+            frame.update(snapshot(maze, memory) if record else {}, why=problem)
             frames.append(frame)
             break
         ms = (time.perf_counter() - t0) * 1000
         slowest = max(slowest, ms)
         if action not in S.ACTIONS:
             problem = f"illegal action {action!r} -- the real grader scores this maze 0"
-            frame.update(snapshot(maze, memory), why=problem)
+            frame.update(snapshot(maze, memory) if record else {}, why=problem)
             frames.append(frame)
             break
 
@@ -153,8 +154,9 @@ def simulate(robot_path, maze):
         else:
             motion = {"rpm": (0, 0), "accel": (0.0, 0.0)}
 
-        frame.update(snapshot(maze, memory), action=action, collided=collided, ms=ms, hits=hits)
-        frames.append(frame)
+        frame.update(snapshot(maze, memory) if record else {}, action=action, collided=collided, ms=ms, hits=hits)
+        if record:
+            frames.append(frame)
         tick += 1
 
     return {"maze": maze, "solved": solved, "ticks": tick, "best": best, "hits": hits,
@@ -166,13 +168,15 @@ def fmt_ms(ms):
     return f"{ms * 1000:.0f} microseconds" if ms < 1 else f"{ms:.1f} ms"
 
 
-def maze_files():
-    return sorted((KIT / "mazes").glob("*.txt"))
+def maze_files(include_dev=False):
+    dev = sorted((Path(__file__).resolve().parent / "mazes").glob("*.txt")) if include_dev else []
+    return sorted((KIT / "mazes").glob("*.txt")) + dev
 
 
 def resolve_maze(name):
     p = Path(name)
-    return p if p.is_file() else KIT / "mazes" / (name if name.endswith(".txt") else name + ".txt")
+    name = name if name.endswith(".txt") else name + ".txt"
+    return next((f for f in maze_files(True) if f.name == name), p)
 
 
 # ----------------------------------------------------------------------------- text mode
@@ -199,6 +203,98 @@ def hard_mode(robot_path, seeds=5):
         print(f"{m.name:<6}{sum(r['solved'] for r in runs):>6}/{seeds}{sum(r['ticks'] for r in runs) / seeds:>11.0f}"
               f"{runs[0]['best']:>10}{sum(r['hits'] for r in runs):>11}{avg:>11.0f}")
     print(f"{'TOTAL':<46}{total:>11.0f} / {100 * len(maze_files())}")
+
+
+def gen_maze(seed, goal="far"):
+    """A random maze in the practice mazes' style: odd grid, border walls, start at (1, 1).
+
+    goal="far":  goal on the cell farthest from the start (true of all 4 practice mazes)
+    goal="rand": goal on a random open cell -- checks we don't break when that pattern doesn't hold
+    """
+    import random
+    rng = random.Random(seed)
+    cw, ch = rng.randint(4, 15), rng.randint(4, 15)
+    W, H = 2 * cw + 1, 2 * ch + 1
+    g = [["#"] * W for _ in range(H)]
+    g[1][1] = "."
+    stack, seen = [(0, 0)], {(0, 0)}
+    while stack:  # recursive backtracker = a perfect maze (exactly one route between any two cells)
+        cx, cy = stack[-1]
+        nbrs = [(cx + dx, cy + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                if 0 <= cx + dx < cw and 0 <= cy + dy < ch and (cx + dx, cy + dy) not in seen]
+        if not nbrs:
+            stack.pop()
+            continue
+        nx, ny = rng.choice(nbrs)
+        seen.add((nx, ny))
+        g[2 * ny + 1][2 * nx + 1] = g[cy + ny + 1][cx + nx + 1] = "."
+        stack.append((nx, ny))
+    loops = rng.choice([0, 0, 0.05, 0.15])  # knock out walls -> more than one route
+    for y in range(1, H - 1):
+        for x in range(1, W - 1):
+            if (x + y) % 2 == 1 and rng.random() < loops:
+                g[y][x] = "."
+    for _ in range(rng.choice([0, 0, 1, 2, 3])):  # open chambers
+        rx, ry = rng.randint(0, cw - 2), rng.randint(0, ch - 2)
+        rw, rh = rng.randint(2, min(4, cw - rx)), rng.randint(2, min(4, ch - ry))
+        for y in range(2 * ry + 1, 2 * (ry + rh)):
+            for x in range(2 * rx + 1, 2 * (rx + rw)):
+                g[y][x] = "."
+    dist, queue = {(1, 1): 0}, deque([(1, 1)])
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy in S.DELTA.values():
+            n = (x + dx, y + dy)
+            if g[n[1]][n[0]] != "#" and n not in dist:
+                dist[n] = dist[(x, y)] + 1
+                queue.append(n)
+    cells = sorted(dist)
+    target = max(cells, key=dist.get) if goal == "far" else rng.choice(cells[1:])
+    g[1][1], g[target[1]][target[0]] = "S", "G"
+    return S.Maze(name=f"{goal}{seed}", rows=["".join(r) for r in g], start=(1, 1), goal=target,
+                  start_heading=rng.choice("NESW"), seed=seed, sensor_range=rng.choice([1, 1, 2, 2, 3, 4]),
+                  noise=rng.choice([0.0, 0.0, 0.05, 0.1]), encoder_jitter=rng.random() < 0.5)
+
+
+def maze_text(m):
+    return (f"!name: {m.name}\n!seed: {m.seed}\n!sensor_range: {m.sensor_range}\n!noise: {m.noise}\n"
+            f"!encoder_jitter: {str(m.encoder_jitter).lower()}\n!heading: {m.start_heading}\n" + "\n".join(m.rows) + "\n")
+
+
+def _bench_one(job):
+    robot_path, seed, goal = job
+    m = gen_maze(seed, goal)
+    r = simulate(robot_path, m, record=False)
+    return {k: r[k] for k in ("solved", "ticks", "best", "hits", "score", "slowest", "problem")} | {
+        "maze": m.name, "range": m.sensor_range, "noise": m.noise, "text": maze_text(m)}
+
+
+def bench_mode(robot_path, n_far=100, n_rand=40):
+    """Score the robot on generated mazes. Worst few are saved to 'for dev/mazes/' so the GUI can replay them."""
+    import multiprocessing
+    jobs = [(robot_path, s, "far") for s in range(n_far)] + [(robot_path, 10000 + s, "rand") for s in range(n_rand)]
+    with multiprocessing.Pool() as pool:
+        res = pool.map(_bench_one, jobs)
+    print(f"{'set':<22}{'mazes':>6}{'solved':>8}{'wall hits':>11}{'avg extra ticks':>17}{'avg score':>11}{'slowest ms':>12}")
+    for label, rows in (("goal = farthest cell", [r for r in res if r["maze"].startswith("far")]),
+                        ("goal = random cell", [r for r in res if r["maze"].startswith("rand")])):
+        solved = [r for r in rows if r["solved"]]
+        extra = sum(r["ticks"] - r["best"] for r in solved) / max(1, len(solved))
+        print(f"{label:<22}{len(rows):>6}{len(solved):>8}{sum(r['hits'] for r in rows):>11}{extra:>17.1f}"
+              f"{sum(r['score'] for r in rows) / len(rows):>11.1f}{max(r['slowest'] for r in rows):>12.2f}")
+    far = [r for r in res if r["maze"].startswith("far")]
+    print("farthest-goal set, avg score by sensor range: " + "  ".join(
+        f"range {k}: {sum(r['score'] for r in far if r['range'] == k) / max(1, sum(r['range'] == k for r in far)):.1f}"
+        for k in (1, 2, 3, 4)))
+    out = Path(__file__).resolve().parent / "mazes"
+    out.mkdir(exist_ok=True)
+    for old in out.glob("*.txt"):
+        old.unlink()
+    worst = sorted(res, key=lambda r: r["score"])[:6]
+    for r in worst:
+        (out / f"{r['maze']}.txt").write_text(r["text"])
+    print("worst: " + ", ".join(f"{r['maze']} {r['score']}" + (" UNSOLVED" if not r["solved"] else "") for r in worst)
+          + "  (saved to 'for dev/mazes/' -- open them in the GUI)")
 
 
 def text_mode(robot_path, which):
@@ -309,7 +405,7 @@ class Viewer:
         top.pack(fill="x")
         self.maze_var = tk.StringVar(value=maze_files()[0].name)
         box = ttk.Combobox(top, textvariable=self.maze_var, state="readonly", width=10,
-                           values=[p.name for p in maze_files()])
+                           values=[p.name for p in maze_files(True)])
         box.pack(side="left")
         Tip(box, TIPS["maze"])
         run = tk.Button(top, text="Run", command=self.run)
@@ -394,7 +490,7 @@ class Viewer:
     def run(self):
         self.playing = False
         self.play_btn.config(text="Play")
-        r = simulate(self.robot_path, S.load_maze(KIT / "mazes" / self.maze_var.get()))
+        r = simulate(self.robot_path, S.load_maze(resolve_maze(self.maze_var.get())))
         self.run_result, self.frames = r, r["frames"]
         m = r["maze"]
         ok = r["solved"]
@@ -515,8 +611,13 @@ def main():
                     help="no GUI: score table for all mazes, or a tick-by-tick log for one maze")
     ap.add_argument("--hard", action="store_true",
                     help="no GUI: practice mazes with range-1 sensors, 10%% noise and jitter, 5 noise seeds each")
+    ap.add_argument("--bench", action="store_true",
+                    help="no GUI: 100 generated mazes with the goal on the farthest cell + 40 with a random goal")
     args = ap.parse_args()
     robot_path = Path(args.robot).resolve()
+    if args.bench:
+        bench_mode(robot_path)
+        return
     if args.hard:
         hard_mode(robot_path)
         return
