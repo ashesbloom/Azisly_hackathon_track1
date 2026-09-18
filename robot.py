@@ -35,13 +35,27 @@ def _update_pose(sensors, memory):
         if sensors["rpm_left"] > 60 and sensors["rpm_right"] > 60:
             memory["pos"] = _ahead(memory["pos"], memory["h"])
         else:
-            memory["known"][_ahead(memory["pos"], memory["h"])] = False  # we hit it: it's a wall
+            memory["sure"][_ahead(memory["pos"], memory["h"])] = False  # we hit it: certainly a wall
     memory["visited"].add(memory["pos"])
+    memory["sure"][memory["pos"]] = True  # we're standing on it: certainly open
+
+
+def _is_open(memory, cell):
+    """True = open, False = wall, None = don't know (never sensed, or the readings are tied)."""
+    sure = memory["sure"].get(cell)
+    if sure is not None:
+        return sure
+    opens, walls = memory["votes"].get(cell, (0, 0))
+    return True if opens > walls else False if walls > opens else None
 
 
 def _sense(sensors, memory):
-    """Write this tick's front/left/right readings into the map. The latest reading wins."""
-    pos, h, known = memory["pos"], memory["h"], memory["known"]
+    """Add this tick's front/left/right readings to the map as votes.
+
+    Noise makes a single reading wrong now and then, so no single reading decides a cell: every reading is a
+    vote for "open" or "wall", and the majority wins. We pass most cells several times, so a bad vote gets outvoted.
+    """
+    pos, h, votes = memory["pos"], memory["h"], memory["votes"]
     readings = ((sensors["dist_front"], h), (sensors["dist_left"], (h - 1) % 4),
                 (sensors["dist_right"], (h + 1) % 4))
     # A reading equal to the sensor range means "at least that far", so it tells us nothing about the
@@ -49,24 +63,41 @@ def _sense(sensors, memory):
     memory["range"] = max(memory["range"], *(d for d, _ in readings))
     for d, dh in readings:
         for i in range(1, d + 1):
-            known[_ahead(pos, dh, i)] = True
-        wall = _ahead(pos, dh, d + 1)
-        if d < memory["range"] and wall not in memory["visited"]:  # never un-open a cell we stood on
-            known[wall] = False
+            votes.setdefault(_ahead(pos, dh, i), [0, 0])[0] += 1
+        if d < memory["range"]:
+            votes.setdefault(_ahead(pos, dh, d + 1), [0, 0])[1] += 1
 
 
-def _route(memory):
-    """Breadth-first search through believed-open cells to the nearest cell we haven't stood on.
+def _next_to(memory, cell, doubt=0):
+    """Directions from `cell` whose neighbour is uncertain.
+
+    doubt=0: unknown (never sensed, or tied votes).
+    doubt=k: a wall we never touched whose wall votes lead by at most k -- maybe a noise-made wall.
+    """
+    out = []
+    for h in range(4):
+        n = _ahead(cell, h)
+        state = _is_open(memory, n)
+        if state is None and not doubt:
+            out.append(h)
+        elif state is False and doubt and n not in memory["sure"]:
+            opens, walls = memory["votes"][n]
+            if walls - opens <= doubt:
+                out.append(h)
+    return out
+
+
+def _route(memory, is_target):
+    """Breadth-first search through believed-open cells to the nearest cell where is_target(cell) holds.
 
     Returns the list of cells to walk through (not including where we are), or None.
-    Every unvisited open cell could be the goal -- we only find out by standing on it.
     """
-    start, known, visited = memory["pos"], memory["known"], memory["visited"]
+    start = memory["pos"]
     came_from = {start: None}
     queue = deque([start])
     while queue:
         cell = queue.popleft()
-        if cell not in visited:
+        if is_target(cell):
             path = []
             while cell != start:
                 path.append(cell)
@@ -74,7 +105,7 @@ def _route(memory):
             return path[::-1]
         for h in range(4):
             nxt = _ahead(cell, h)
-            if nxt not in came_from and known.get(nxt):
+            if nxt not in came_from and _is_open(memory, nxt):
                 came_from[nxt] = cell
                 queue.append(nxt)
     return None
@@ -105,27 +136,43 @@ def decide(sensors, memory):
     nearest cell we have not stood on yet -- any of them could be the goal.
 
     memory keys also read by the dev viewer (the grader ignores them):
-        why (str), plan (list of cells), known ({cell: open?}), visited (set)
+        why (str), plan (list of cells), known ({cell: open?}), visited (set), pos, h
     ------------------------------------------------------------------------
     """
     if not memory:
-        memory.update(pos=(0, 0), h=0, last=None, range=1, known={(0, 0): True}, visited=set())
+        memory.update(pos=(0, 0), h=0, last=None, range=1, votes={}, sure={}, visited=set())
 
     _update_pose(sensors, memory)
     _sense(sensors, memory)
+    # for the dev viewer only: the map as it currently stands
+    memory["known"] = {c: _is_open(memory, c) for c in set(memory["votes"]) | set(memory["sure"])
+                       if _is_open(memory, c) is not None}
 
-    path = _route(memory)
+    h, pos = memory["h"], memory["pos"]
+    # Targets, in order: a cell we haven't stood on (any could be the goal), or a spot next to a cell we
+    # know nothing about (unsensed, or noise left its votes tied). Arriving there senses it.
+    doubt = 0
+    path = _route(memory, lambda c: c not in memory["visited"] or _next_to(memory, c))
+    reason = "nearest unvisited or unsensed spot"
+    while path is None and doubt < 50:
+        # Everything reachable is explored and still no goal: noise must have faked a wall somewhere.
+        # Re-check the walls we are least sure about; widen the net if that finds nothing.
+        doubt = memory["doubt"] = max(doubt + 1, memory.get("doubt", 1))
+        path = _route(memory, lambda c: _next_to(memory, c, doubt))
+        reason = "map explored, no goal -> re-checking a doubtful wall"
     memory["plan"] = path or []
-    h = memory["h"]
     if not path:
-        # Nothing reachable we haven't stood on. Usually the cell behind the start was never sensed;
-        # turning brings it into the side sensors.
-        action = "turn_left"
-        memory["why"] = "no known unvisited cell reachable -> turn left to sense what's behind"
+        uncertain = _next_to(memory, pos, doubt)
+        if uncertain and (h + 2) % 4 not in uncertain:
+            action = "wait"
+            memory["why"] = "a cell next to us is uncertain -> wait one tick for a fresh reading"
+        else:
+            action = "turn_left"
+            memory["why"] = "the cell behind us is uncertain -> turn left to bring it into view"
     else:
         pos, nxt = memory["pos"], path[0]
         want = DIRS.index((nxt[0] - pos[0], nxt[1] - pos[1]))
-        target = f"nearest unvisited cell (ring) is {len(path)} step{'s' if len(path) > 1 else ''} away"
+        target = f"{reason} (ring) is {len(path)} step{'s' if len(path) > 1 else ''} away"
         if want == h:
             action = "forward"
             memory["why"] = f"{target}, next cell is ahead and mapped open -> forward"

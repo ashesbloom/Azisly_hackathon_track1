@@ -54,6 +54,7 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 |---|---|---|---|---|---|---|
 | 0 | wall follower | 282 | 150 | 96/100, 85.2, 30.8 | 32/40, 86.9, 41.8 | 112 |
 | 1 | explorer (nearest unvisited) | 304 | 173 | 98/100, 135.5, 26.5 | 39/40, 101.1, 44.5 | 178 |
+| 2 | noise voting + re-checking uncertain cells | 298 | 167 (20/20 solved) | 98/100, 129.8, 26.1 | 40/40, 105.2, 43.5 | 37 |
 
 Use `python3.11`. The macOS system `python3` (3.9, Tk 8.5) freezes any window, including the kit's `play.py`.
 The grader runs 3.11+ anyway.
@@ -128,3 +129,49 @@ The grader runs 3.11+ anyway.
 - **Later, on the 140-maze benchmark** (added after this entry): the explorer is *worse* than the wall follower on the
   farthest-goal set (135.5 vs 85.2 extra ticks). On big mazes "nearest unvisited cell" zig-zags: it leaves a branch half
   done, goes elsewhere, and walks back later. The wall follower is a depth-first search -- it finishes a branch before the next.
+
+---
+
+## #2 Noise voting, plus going back to re-check uncertain cells
+
+- **What:**
+  1. **Votes instead of "latest wins" (`_sense`, `_is_open`).** Every reading is a vote: "open" for the cells it saw
+     through, "wall" for the cell it stopped at. A cell is open if open votes > wall votes, a wall if the opposite,
+     and **unknown** if tied. Two things are certain and skip voting: a cell we stood on is open, and a cell we drove
+     into is a wall (`memory["sure"]`).
+  2. **Unknown cells are targets (`_next_to`, `_route`).** Before, the robot only went to cells it hadn't stood on.
+     Now "next to an unknown cell" is also a target, because arriving there senses it.
+  3. **If already next to an uncertain cell:** `wait` one tick for a fresh reading, since noise is re-rolled every tick.
+     If the cell is behind us, turn to face it.
+  4. **Safety net:** if everything is explored and there's still no goal, noise must have faked a wall. Go re-check
+     the walls whose lead is smallest (wall votes minus open votes <= k), widening k until something is found.
+- **Why:** with noise, one wrong reading used to decide a cell. It either drove us into a wall (-7 points) or hid an
+  open corridor. Most cells get seen several times as we pass, so a majority vote almost always gets them right.
+- **Two bugs found and fixed while building it** (both only happen with voting):
+  - A tied cell was "unknown", and nothing ever sent the robot back to look. On `--hard` p02 it sat spinning in a
+    dead end until the tick cap, because the only way east was a tied cell. That's why unknown cells became targets.
+  - The first safety net counted any wall with even one stray "open" vote as doubtful *forever*. Two cells each
+    pointed at the other as "the place to re-check", and it ping-ponged. Fixed with the small-lead rule, which
+    re-checking settles, and by waiting in place when already next to the cell.
+- **Where:** `_update_pose` (sure cells), `_is_open`, `_sense`, `_next_to`, `_route`, `decide`.
+- **Result:**
+
+| suite | before (#1) | after (#2) |
+|---|---|---|
+| practice | 304 | 298 |
+| hard: solved / wall hits / score | 17/20, 70, 173 | **20/20, 4, 167** |
+| bench far: solved / extra ticks / score | 98/100, 135.5, 26.5 | 98/100, 129.8, 26.1 |
+| bench random: solved / extra ticks / score | 39/40, 101.1, 44.5 | 40/40, 105.2, 43.5 |
+| bench wall hits | 178 | **37** |
+
+- **What we learned:**
+  - Scores barely moved, but the failure modes changed completely: wall hits dropped by 80% and every hard run now
+    finishes. Being robust matters more than those few points, because the hidden mazes are noisier than the practice ones.
+  - Practice dropped 6 points (p01 +2 ticks, p04 +1). These are tiny: `wait` ticks spent confirming a tied cell.
+  - The 2 bench failures are no longer bugs:
+    - far37 (29x27, range 1) is simply too slow: it visited 331 cells before the tick cap.
+    - far68 explored 342 of 343 cells and was re-checking walls when time ran out.
+
+    Both point at the real problem: **exploration order**.
+  - On range-1 noisy mazes it spends ~55 ticks per maze on `wait`. Worth revisiting later.
+- **Verdict:** kept.
