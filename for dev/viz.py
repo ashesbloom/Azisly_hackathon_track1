@@ -78,8 +78,12 @@ def to_world(maze, cell):
 
 def snapshot(maze, memory):
     """Copy the optional viewer keys out of memory, converted to maze coordinates."""
-    out = {"why": str(memory.get("why", "")), "plan": [], "known": None, "visited": set()}
+    out = {"why": str(memory.get("why", "")), "plan": [], "known": None, "visited": set(), "est": None}
     try:
+        if "pos" in memory and "h" in memory:
+            h = int(memory["h"])
+            out["est"] = (tuple(memory["pos"]), h, to_world(maze, memory["pos"]),
+                          S.HEADINGS[(S.HEADINGS.index(maze.start_heading) + h) % 4])
         out["plan"] = [to_world(maze, c) for c in memory.get("plan", [])]
         if "known" in memory:
             out["known"] = {to_world(maze, c): bool(v) for c, v in memory["known"].items()}
@@ -158,6 +162,10 @@ def simulate(robot_path, maze):
             "problem": problem, "frames": frames}
 
 
+def fmt_ms(ms):
+    return f"{ms * 1000:.0f} microseconds" if ms < 1 else f"{ms:.1f} ms"
+
+
 def maze_files():
     return sorted((KIT / "mazes").glob("*.txt"))
 
@@ -206,7 +214,7 @@ def text_mode(robot_path, which):
     for r in rows:
         m = r["maze"]
         print(f"{m.name:<6}{'yes' if r['solved'] else 'NO':<8}{r['ticks']:>6}{r['best']:>10}"
-              f"{r['hits']:>11}{r['score']:>7}{r['slowest']:>12.1f}"
+              f"{r['hits']:>11}{r['score']:>7}{r['slowest']:>12.3f}"
               + (f"   <- {r['problem']}" if r["problem"] else ""))
     print(f"{'TOTAL':<41}{sum(r['score'] for r in rows):>7} / {100 * len(rows)}")
 
@@ -230,22 +238,27 @@ TIPS = {
              "equal to the range means 'at least that far'). Noise = chance a reading is off by 1. "
              "Jitter = wheel speeds wobble by about 5.",
     "tick": "Which tick of the run you are looking at, out of the total. Drag the slider or use the arrow keys.",
-    "pos": "The robot's TRUE cell (x across, y down from the top-left) and heading, taken from the "
-           "maze file. The robot itself only knows where it is relative to its start.",
+    "pos": "The robot's TRUE cell (x across, y down from the top-left) and compass heading. Only the "
+           "viewer knows this, because it reads the maze file like the referee does. The robot is never told.",
+    "est": "The robot's OWN estimate, from memory['pos'] and memory['h']. It has no GPS, so it invents its "
+           "own coordinates: wherever it starts is (0, 0), and whichever way it first faces it calls 'N' "
+           "(heading 0). Each turn adds or subtracts 90 degrees; each forward whose wheels read about +120 "
+           "moves it one cell. The line below converts that into maze terms so you can check it against the truth.",
     "action": "What decide() returned on this tick. The maze shows the robot BEFORE this action.",
     "why": "The robot's own reason for this action, from memory['why'].",
     "sensors": "Distance readings the robot received this tick: open cells before a wall to the "
                "front / left / right. May be off by 1 on noisy mazes.",
     "wheels": "Wheel speeds caused by the PREVIOUS action: +120/+120 = moved one cell, "
               "-60/+60 = turned left, +60/-60 = turned right, 0/0 = waited or hit a wall.",
-    "hits_now": "Wall hits so far, up to this tick.",
+    "hits_now": "Wall hits so far, up to this tick. 0 is the goal: each hit costs 7 points. Turns red on the "
+                "tick a hit happens. The practice mazes rarely cause hits; run --hard to see them.",
     "ms": f"How long decide() took on this tick. Limit {TICK_LIMIT_MS} ms.",
 }
 
 LEGEND = [
-    ("#3b3f45", "wall", "A wall cell the robot has sensed (or any wall, if the robot shares no map)."),
-    ("#ffffff", "open", "An open cell the robot has sensed (or any open cell, if the robot shares no map)."),
-    ("#a9adb3", "unsensed wall", "A wall the robot has not sensed yet. Only shown when the robot shares "
+    ("#3D3D3D", "wall", "A wall cell the robot has sensed (or any wall, if the robot shares no map)."),
+    ("#F5FFF0", "open", "An open cell the robot has sensed (or any open cell, if the robot shares no map)."),
+    ("#C4C4C4", "unsensed wall", "A wall the robot has not sensed yet. Only shown when the robot shares "
                                   "its map in memory['known']."),
     ("#e9ebee", "unsensed open", "An open cell the robot has not sensed yet. Only shown when the robot "
                                   "shares its map in memory['known']."),
@@ -257,7 +270,7 @@ LEGEND = [
     ("#d6336c", "goal", "The goal. The robot doesn't know where it is until it steps on it."),
 ]
 COL = {name: color for color, name, _ in LEGEND}
-GRID = "#d0d4d9"
+GRID = "#414141"
 HIT = "#e03131"
 
 
@@ -303,6 +316,7 @@ class Viewer:
         run.pack(side="left", padx=6)
         Tip(run, TIPS["run"])
         self.result = {}
+        self.fg = tk.Label(root).cget("fg")  # "systemTextColor" on macOS: follows light/dark mode
         for key in ("result", "ticks", "best", "score", "hits", "slowest"):
             lbl = tk.Label(top, text="", padx=6)
             lbl.pack(side="left")
@@ -330,7 +344,8 @@ class Viewer:
         side.pack(side="right", fill="y")
         side.pack_propagate(False)
         self.side = {}
-        for key, title in (("setup", "Maze setup"), ("tick", "Tick"), ("pos", "True position"),
+        for key, title in (("setup", "Maze setup"), ("tick", "Tick"), ("pos", "True position (referee's view)"),
+                           ("est", "Robot thinks it is at"),
                            ("action", "Action"), ("why", "Why"), ("sensors", "Sensors"),
                            ("wheels", "Wheels (from previous action)"), ("hits_now", "Wall hits so far"),
                            ("ms", "decide() time")):
@@ -389,8 +404,8 @@ class Viewer:
         self.result["best"].config(text=f"Shortest possible: {r['best']}")
         self.result["score"].config(text=f"Score: {r['score']} / 100")
         self.result["hits"].config(text=f"Wall hits: {r['hits']}")
-        self.result["slowest"].config(text=f"Slowest tick: {r['slowest']:.1f} ms",
-                                      fg=HIT if r["slowest"] > TICK_LIMIT_MS else "#222")
+        self.result["slowest"].config(text=f"Slowest tick: {fmt_ms(r['slowest'])}",
+                                      fg=HIT if r["slowest"] > TICK_LIMIT_MS else self.fg)
         self.side["setup"].config(text=f"range {m.sensor_range} | noise {m.noise:.0%} | "
                                        f"jitter {'on' if m.encoder_jitter else 'off'}")
         self.slider.config(to=len(self.frames) - 1)
@@ -470,15 +485,27 @@ class Viewer:
         p = f["packet"]
         self.side["tick"].config(text=f"{f['tick']}  ({self.i + 1} of {len(self.frames)} frames)")
         self.side["pos"].config(text=f"({f['x']}, {f['y']}) facing {f['heading']}")
+        if f["action"] is None:
+            self.side["est"].config(text="(run over -- the robot never gets another tick, so it never "
+                                         "updates for its last move)", fg=self.fg)
+        elif f["est"]:
+            (ex, ey), eh, world, wh = f["est"]
+            ok = world == (f["x"], f["y"]) and wh == f["heading"]
+            self.side["est"].config(
+                text=f"({ex}, {ey}) of its own grid, facing {['its start direction', '90 deg right of start', 'back toward start direction', '90 deg left of start'][eh % 4]}\n"
+                     f"= maze ({world[0]}, {world[1]}) facing {wh}  {'-- matches the truth' if ok else '-- WRONG, the robot is lost'}",
+                fg=self.fg if ok else HIT)
+        else:
+            self.side["est"].config(text="(robot doesn't share memory['pos'] / memory['h'])", fg=self.fg)
         self.side["action"].config(text=(f["action"] or "none (run over)") +
                                    ("   -> HIT WALL" if f["collided"] else ""),
-                                   fg=HIT if f["collided"] else "#222")
+                                   fg=HIT if f["collided"] else self.fg)
         self.side["why"].config(text=f["why"] or "(robot gave no reason)")
         self.side["sensors"].config(text=f"front {p['dist_front']}   left {p['dist_left']}   "
                                          f"right {p['dist_right']}")
         self.side["wheels"].config(text=f"left {p['rpm_left']:+d}   right {p['rpm_right']:+d}")
         self.side["hits_now"].config(text=str(f["hits"]))
-        self.side["ms"].config(text=f"{f['ms']:.2f} ms", fg=HIT if f["ms"] > TICK_LIMIT_MS else "#222")
+        self.side["ms"].config(text=fmt_ms(f["ms"]), fg=HIT if f["ms"] > TICK_LIMIT_MS else self.fg)
 
 
 def main():
