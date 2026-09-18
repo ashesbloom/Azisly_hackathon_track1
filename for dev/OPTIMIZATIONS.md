@@ -56,6 +56,8 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 1 | explorer (nearest unvisited) | 304 | 173 | 98/100, 135.5, 26.5 | 39/40, 101.1, 44.5 | 178 |
 | 2 | noise voting + re-checking uncertain cells | 298 | 167 (20/20 solved) | 98/100, 129.8, 26.1 | 40/40, 105.2, 43.5 | 37 |
 | 3 | turn-aware routing | **370** | 194 (20/20) | **100/100, 102.0**, 26.9 | 39/40, 111.5, 42.4 | 31 |
+| 4 | skip cells that can't be the goal (farthest-cell rule) | 370 | 187 (20/20) | 100/100, 95.6, 27.6 | 38/40, 98.3, 42.5 | 36 |
+| 5 | prefer deeper targets (W = 0.25) | 370 | 197 (20/20) | 100/100, **89.7, 32.8** | 40/40, 112.4, 41.2 | 44 |
 
 Use `python3.11`. The macOS system `python3` (3.9, Tk 8.5) freezes any window, including the kit's `play.py`.
 The grader runs 3.11+ anyway.
@@ -205,3 +207,52 @@ The grader runs 3.11+ anyway.
   - Spotted: at the start (t000-t002 of rand10033) it turns left to look behind, then needs two more turns to face
     the open corridor on the right. Turning right first would have looked behind *and* faced the corridor.
 - **Verdict:** kept.
+
+---
+
+## #4 Skip cells that provably can't be the goal
+
+- **The observation:** in all 4 practice mazes the goal is the single cell **farthest from the start**, and a dead end.
+  That's very unlikely to be chance, so the maze generator probably places goals that way.
+- **What:** every tick, `_could_be_goal` works out which cells could still be the farthest one:
+  1. `shortest_known`: distance from the start through cells we *know* are open. The real distance is this or shorter.
+  2. `at_least`: distance from the start pretending every unknown cell is open. The real distance is this or longer.
+  3. Some open cell is at least `beat = max(at_least)` away, so the goal is at least that far too.
+     A cell whose `shortest_known` is less than `beat` can't be the goal. We skip it: the viewer draws it with a small x.
+  4. A pocket of unknown cells walled in on every side can't hide anything farther than its entrance distance + its size.
+     If that's less than `beat`, we don't go and look inside.
+  5. **SLACK = 3:** the practice mazes can't tell whether "farthest" means steps or ticks-with-turns. On generated mazes
+     those two definitions pick different cells 19% of the time, but never more than 3 steps apart. So we only skip
+     cells that are more than 3 short.
+  6. **Safety net:** if nothing is left that fits the rule (noise fooled us, or this maze doesn't follow it),
+     go back to exploring everything. The rule can only reorder our exploration, never strand us.
+- **Where:** `_bfs`, `_could_be_goal`, `_next_to(among=...)`, `decide`. Viewer: the "ruled out" legend item.
+- **Result:** bench far extra ticks 102.0 -> 95.6. Random-goal set 39/40 -> 38/40: when the goal is near the start the
+  rule sends us away from it first, and the tick cap is tight on short mazes. Practice unchanged at 370.
+- **What we learned:** smaller gain than hoped. `beat` only grows once we've been deep into the maze, so early on
+  almost nothing can be ruled out. What matters more is *which way we go first*. That's #5.
+- **Verdict:** kept. It's the foundation for #5.
+
+---
+
+## #5 Prefer targets deeper in the maze
+
+- **What:** instead of always going to the nearest possible-goal spot, pick the one with the lowest
+  `ticks to get there - W x (its at_least distance from the start)`. So a spot 8 steps deeper is worth a walk of up to
+  2 ticks longer (W = 0.25). `_route` now searches all reachable states when given a `value` function.
+- **Why:** the goal is the farthest cell. At a fork, the branch reaching deeper is more likely to hold it, and a
+  wrong branch costs twice (in and back out).
+- **Choosing W** (swept on everything):
+
+| W | practice | hard | bench far: extra ticks, score | bench random: solved, extra ticks |
+|---|---|---|---|---|
+| 0 (= #4) | 370 | 187 | 95.6, 27.6 | 38/40, 98.3 |
+| **0.25** | 370 | **197** | 89.7, **32.8** | **40/40**, 112.4 |
+| 0.5 | 370 | 197 | **88.7**, 32.8 | 40/40, 127.0 |
+| 1 | 370 | 190 | 89.2, 34.3 | 40/40, 133.8 |
+| 2 | 374 | 179 | 113.0, 30.8 (1 unsolved) | 39/40, 107.4 |
+
+- **What we learned:** a little depth preference helps, and too much hurts: at W = 2 it charges off deep and leaves
+  things behind that it has to walk back for. 0.25 and 0.5 are about the same on the farthest-goal set. 0.25 wastes
+  less when the goal isn't far, which is our insurance if the hidden mazes don't follow the rule.
+- **Verdict:** kept with W = 0.25.

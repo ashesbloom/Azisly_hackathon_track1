@@ -79,7 +79,8 @@ def to_world(maze, cell):
 
 def snapshot(maze, memory):
     """Copy the optional viewer keys out of memory, converted to maze coordinates."""
-    out = {"why": str(memory.get("why", "")), "plan": [], "known": None, "visited": set(), "est": None}
+    out = {"why": str(memory.get("why", "")), "plan": [], "known": None, "visited": set(), "est": None,
+           "ruled_out": set()}
     try:
         if "pos" in memory and "h" in memory:
             h = int(memory["h"])
@@ -89,6 +90,7 @@ def snapshot(maze, memory):
         if "known" in memory:
             out["known"] = {to_world(maze, c): bool(v) for c, v in memory["known"].items()}
         out["visited"] = {to_world(maze, c) for c in memory.get("visited", ())}
+        out["ruled_out"] = {to_world(maze, c) for c in memory.get("ruled_out", ())}
     except (TypeError, ValueError):
         pass  # robot stored something odd -- just don't draw it
     return out
@@ -361,6 +363,8 @@ LEGEND = [
     ("#f08c00", "wrong belief", "The robot's map disagrees with the truth here, e.g. a noisy reading "
                                  "made it think a wall is open. Driving on a wrong belief causes wall hits."),
     ("#7a8ca3", "visited", "Cells the robot has stood on (memory['visited'])."),
+    ("#b8bec7", "ruled out", "Open cells the robot has proven can't be the goal, so it won't go out of its way "
+                             "to visit them (memory['ruled_out']). Drawn as a small x."),
     ("#2f6fdb", "plan", "The route the robot intends to take next (memory['plan']); the ring marks its target."),
     ("#2fa84f", "start", "Where the robot started."),
     ("#d6336c", "goal", "The goal. The robot doesn't know where it is until it steps on it."),
@@ -556,6 +560,11 @@ class Viewer:
                     c.create_rectangle(x * s + 2, y * s + 2, x * s + s - 2, y * s + s - 2,
                                        outline=COL["wrong belief"], width=3)
 
+        for cell in f["ruled_out"]:
+            cx, cy = center(cell)
+            d = s * .18
+            c.create_line(cx - d, cy - d, cx + d, cy + d, fill=COL["ruled out"], width=2)
+            c.create_line(cx - d, cy + d, cx + d, cy - d, fill=COL["ruled out"], width=2)
         for cell in f["visited"]:
             cx, cy = center(cell)
             c.create_oval(cx - s * .12, cy - s * .12, cx + s * .12, cy + s * .12,
