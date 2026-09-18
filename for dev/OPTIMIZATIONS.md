@@ -3,6 +3,26 @@
 This file records every change to `robot.py`, why it was made, and what it did to the score.
 It is for us, not the grader: only `robot.py` (renamed to our team id) is submitted.
 
+## Where we ended up (read this first)
+
+| | wall follower (start) | final robot |
+|---|---|---|
+| practice mazes | 282 / 400 | **376 / 400** (p02, p03 perfect) |
+| hard: practice mazes with range 1, 10% noise, jitter | 150 / 400 | **204 / 400** |
+| benchmark: solved | 174 / 190 | **190 / 190** |
+| benchmark: wall hits | 151 | **54** |
+| benchmark: total score (190 mazes) | 6027 | **6639 (+10%)** |
+| slowest thinking on a 61x61 maze | -- | ~6 s of the 30 s allowed |
+
+Honest reading: the big wins are **reliability** (the wall follower fails 16 of 190 mazes = 16 zeros; we fail none)
+and **safety** (a third of the wall hits). On huge mazes both robots burn many ticks exploring, because the goal is
+invisible until you stand on it. The wall follower's "avg extra ticks" looks lower (85 vs 92) only because that
+average skips the mazes it failed.
+
+What worked, biggest first: turn-aware routing (#3), noise voting (#2), skipping cells that can't be the goal plus
+preferring deeper targets (#4, #5), turning toward open space (#6), speed (#11), the safety net (#12).
+Tried and dropped, with the reasons: #7, #8, #10. Tuning plateau: #9.
+
 ```
 python3.11 "for dev/viz.py"               # the viewer: pick a maze, Run, step through with ← →
 python3.11 "for dev/viz.py" --text        # score table for all 4 practice mazes
@@ -66,6 +86,7 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 9 | *tuning sweep:* SLACK x W | -- | -- | all within 1% (plateau) | -- | -- |
 | 10 | *tried, reverted:* "goal must be a dead end" rule | 352 | 204 | 99/100, 87.7 | 39/40, 105.1 | 62 |
 | 11 | speed: 5x faster, identical decisions | 376 | 204 | unchanged | unchanged | unchanged |
+| 12 | safety net: never crash | 376 | 204 | unchanged | unchanged | unchanged |
 
 From #7 on the benchmark also has the farthest-by-ticks set. For #6 it reads: 50/50 solved, 128.3 extra ticks, score 29.9.
 
@@ -384,3 +405,41 @@ that just tunes to our benchmark's luck, not to the hidden mazes.
 | typical benchmark tick | ~2 ms | ~1 ms |
 
 - **Verdict:** kept.
+
+---
+
+## #12 Safety net: an error never crashes the robot
+
+- **What:** `decide()` now runs the strategy (`_explore`) inside a try/except. If anything raises, it prints the error
+  to **stderr** (allowed: the grader returns stderr to us) and finishes that maze with the kit's original right-hand
+  wall follower (`_wall_follower`).
+- **Why:** a crash ends the run and scores the maze 0. Our code is tested on 214 runs, but the hidden mazes can do
+  things ours don't. The wall follower keeps no map, so it can't be broken by a bad map, and it solved 174 of our
+  190 benchmark mazes on its own.
+- **Tested:** injected a fake bug at tick 30. All 4 practice mazes were still solved (85 / 112 / 152 / 63 ticks), and the
+  viewer shows "SAFETY NET" in the Why line from tick 30 on. Normal behaviour: all 214 fingerprint runs identical.
+- **Verdict:** kept.
+
+---
+
+## Compliance check against the contract (done on the final `robot.py`)
+
+| rule (CONTRACT.md / README.md) | status | how we checked |
+|---|---|---|
+| One file, Python 3.11+, standard library only | ok | imports are only `json`, `sys`, `collections.deque`. Runs on 3.11 **and** 3.9 |
+| Don't edit the `DO NOT EDIT` block | ok | byte-for-byte diff against the kit's original: identical |
+| Never print to stdout except the action | ok | our only `print` goes to `sys.stderr` (safety-net message) |
+| `{"ready": true}` within 10 s, no heavy work at import | ok | ready after ~20 ms. Import only defines functions |
+| Answer each tick within 0.5 s (final) | ok | slowest tick seen: ~40 ms, on a 61x61 maze with 6 runs in parallel |
+| 30 s per maze, 10 min in total (final) | ok | 61x61 maze: ~6 s total. Benchmark mazes: ~1 s or less |
+| Only the 4 legal actions | ok | every action comes from forward / turn_left / turn_right / wait. The viewer stops a run on anything else, and never did |
+| Don't read other files, find hidden mazes, or touch the grader | ok | no file, network or process calls (grep-checked) |
+| Decide from the sensor stream; no hard-coded moves for a specific maze | ok | every move comes from the map built from readings. No maze-specific code |
+| `selftest.py` passes | ok | PASSED on 3.11 and 3.9 |
+| Real plumbing matches the viewer | ok | `sim_lite.run` (subprocess, like `play.py`) gives the same ticks and hits on all 4 practice mazes |
+
+**One judgement call to be aware of:** #4/#5 use a pattern from the practice mazes (the goal is the cell farthest from
+the start). That's a strategy, not hard-coded moves. The robot still decides everything from its own sensor readings,
+and if the pattern doesn't hold it falls back to exploring everything. On the random-goal benchmark set, where the
+pattern is false on purpose, it still solves 40/40. If the hidden mazes don't follow the pattern, we lose some
+efficiency, not correctness. The mock round will tell us which: compare the random-goal-like mazes' scores there.

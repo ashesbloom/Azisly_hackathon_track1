@@ -281,15 +281,54 @@ def decide(sensors, memory):
     Returns one of: "forward", "turn_left", "turn_right", "wait"
 
     ------------------------------------------------------------------------
-    Strategy (see "for dev/OPTIMIZATIONS.md" for the history and the why):
-    track our own position, map every wall we sense, and always walk to the
-    nearest cell we have not stood on yet -- any of them could be the goal.
+    Strategy (see "for dev/OPTIMIZATIONS.md" for the history and the why of each part):
+      1. Track our own position from our actions; the wheels tell us if a
+         forward was blocked (a wall hit).                    _update_pose
+      2. Map every cell by majority vote of all readings, so a single noisy
+         reading can't fool us.                               _sense, _mark
+      3. The goal has been the cell farthest from the start in every maze
+         seen, so skip cells that provably can't be the farthest.
+                                                              _could_be_goal
+      4. Walk to the best remaining spot: fewest ticks away counting turns,
+         with a slight preference for spots deeper in the maze.     _route
+      5. If that runs out, explore everything; if the map is fully explored
+         with no goal, re-check the walls we're least sure of.
+      6. If anything ever raises an error, finish with the kit's wall follower
+         rather than crash.                                   _wall_follower
 
     memory keys also read by the dev viewer (the grader ignores them):
         why (str), plan (list of cells), known ({cell: open?}), visited (set), pos, h,
         ruled_out (set: open cells that can't be the goal)
     ------------------------------------------------------------------------
     """
+    if memory.get("fallback"):
+        return _wall_follower(sensors, memory)
+    try:
+        return _explore(sensors, memory)
+    except Exception as error:  # never crash: a crash scores 0 for the whole maze
+        print(f"decide() failed on tick {sensors.get('tick')}: {error!r} -- finishing with the wall follower",
+              file=sys.stderr)
+        memory["fallback"] = True
+        return _wall_follower(sensors, memory)
+
+
+def _wall_follower(sensors, memory):
+    """The kit's right-hand wall follower. Our safety net: dumb, but it needs no memory, so it can't be broken."""
+    turned_right_last_tick = memory.get("turned_right", False)
+    memory["turned_right"] = False
+    if sensors["dist_right"] > 0 and not turned_right_last_tick:
+        memory["turned_right"] = True
+        memory["why"] = "SAFETY NET (an error happened): right side open -> turn right"
+        return "turn_right"
+    if sensors["dist_front"] > 0:
+        memory["why"] = "SAFETY NET (an error happened): front open -> forward"
+        return "forward"
+    memory["why"] = "SAFETY NET (an error happened): right and front blocked -> turn left"
+    return "turn_left"
+
+
+def _explore(sensors, memory):
+    """The real strategy -- see decide()."""
     if not memory:
         memory.update(pos=(0, 0), h=0, last=None, range=1, votes={}, sure={}, known={}, visited=set(), version=0)
 
