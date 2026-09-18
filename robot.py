@@ -35,18 +35,39 @@ def _update_pose(sensors, memory):
         if sensors["rpm_left"] > 60 and sensors["rpm_right"] > 60:
             memory["pos"] = _ahead(memory["pos"], memory["h"])
         else:
-            memory["sure"][_ahead(memory["pos"], memory["h"])] = False  # we hit it: certainly a wall
-    memory["visited"].add(memory["pos"])
-    memory["sure"][memory["pos"]] = True  # we're standing on it: certainly open
+            _mark(memory, _ahead(memory["pos"], memory["h"]), sure=False)  # we hit it: certainly a wall
+    if memory["pos"] not in memory["visited"]:
+        memory["visited"].add(memory["pos"])
+        memory["version"] += 1
+    _mark(memory, memory["pos"], sure=True)  # we're standing on it: certainly open
+
+
+def _mark(memory, cell, vote=None, sure=None):
+    """Record a vote (True = open, False = wall) or a certainty for one cell, and update the map entry for it.
+
+    memory["known"] is the map: {cell: True open / False wall}; cells we don't know are simply absent.
+    It is updated here, one cell at a time, so nothing has to rebuild it every tick. memory["version"] counts
+    real changes (a cell's state flipping, a new cell visited) so work based on the map can be reused until then.
+    """
+    if sure is not None:
+        memory["sure"][cell] = sure
+    if vote is not None:
+        memory["votes"].setdefault(cell, [0, 0])[0 if vote else 1] += 1
+    state = memory["sure"].get(cell)
+    if state is None:
+        opens, walls = memory["votes"].get(cell, (0, 0))
+        state = True if opens > walls else False if walls > opens else None
+    if memory["known"].get(cell) is not state:
+        memory["version"] += 1  # the map changed: anything worked out from it must be redone
+    if state is None:
+        memory["known"].pop(cell, None)
+    else:
+        memory["known"][cell] = state
 
 
 def _is_open(memory, cell):
     """True = open, False = wall, None = don't know (never sensed, or the readings are tied)."""
-    sure = memory["sure"].get(cell)
-    if sure is not None:
-        return sure
-    opens, walls = memory["votes"].get(cell, (0, 0))
-    return True if opens > walls else False if walls > opens else None
+    return memory["known"].get(cell)
 
 
 def _sense(sensors, memory):
@@ -55,7 +76,7 @@ def _sense(sensors, memory):
     Noise makes a single reading wrong now and then, so no single reading decides a cell: every reading is a
     vote for "open" or "wall", and the majority wins. We pass most cells several times, so a bad vote gets outvoted.
     """
-    pos, h, votes = memory["pos"], memory["h"], memory["votes"]
+    pos, h = memory["pos"], memory["h"]
     readings = ((sensors["dist_front"], h), (sensors["dist_left"], (h - 1) % 4),
                 (sensors["dist_right"], (h + 1) % 4))
     # A reading equal to the sensor range means "at least that far", so it tells us nothing about the
@@ -63,9 +84,9 @@ def _sense(sensors, memory):
     memory["range"] = max(memory["range"], *(d for d, _ in readings))
     for d, dh in readings:
         for i in range(1, d + 1):
-            votes.setdefault(_ahead(pos, dh, i), [0, 0])[0] += 1
+            _mark(memory, _ahead(pos, dh, i), vote=True)
         if d < memory["range"]:
-            votes.setdefault(_ahead(pos, dh, d + 1), [0, 0])[1] += 1
+            _mark(memory, _ahead(pos, dh, d + 1), vote=False)
 
 
 def _next_to(memory, cell, doubt=0, among=None):
@@ -87,6 +108,20 @@ def _next_to(memory, cell, doubt=0, among=None):
     return out
 
 
+def _watchers(memory, doubt=0, among=None):
+    """{open cell: directions from it to an uncertain neighbour}, for every open cell (see _next_to).
+
+    Worked out once per tick, so the route search can ask "does standing here show us something?" instantly.
+    """
+    out = {}
+    for cell, is_open in memory["known"].items():
+        if is_open:
+            dirs = _next_to(memory, cell, doubt, among)
+            if dirs:
+                out[cell] = dirs
+    return out
+
+
 TURN = {"turn_left": -1, "turn_right": 1}
 
 # The goal has been the cell FARTHEST from the start in every maze we've seen (all 4 practice mazes). We only use
@@ -96,16 +131,28 @@ SLACK = 3
 DEPTH_WEIGHT = 0.25  # swept 0 / 0.25 / 0.5 / 1 / 2 on the benchmark; see OPTIMIZATIONS.md #5
 
 
-def _bfs(start, passable):
-    dist = {start: 0}
-    queue = deque([start])
+def _bfs(known, box=None):
+    """Steps from the start to every cell reachable through known-open cells.
+
+    With `box`: through every cell that isn't a known wall (unknown counts as open), staying inside the box.
+    """
+    dist = {(0, 0): 0}
+    queue = deque([(0, 0)])
     while queue:
         cell = queue.popleft()
-        for h in range(4):
-            nxt = _ahead(cell, h)
-            if nxt not in dist and passable(nxt):
-                dist[nxt] = dist[cell] + 1
-                queue.append(nxt)
+        x, y = cell
+        d = dist[cell] + 1
+        for nxt in ((x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)):
+            if nxt in dist:
+                continue
+            state = known.get(nxt)
+            if box is None:
+                if state is not True:
+                    continue
+            elif state is False or not (box[0] <= nxt[0] <= box[1] and box[2] <= nxt[1] <= box[3]):
+                continue
+            dist[nxt] = d
+            queue.append(nxt)
     return dist
 
 
@@ -126,8 +173,8 @@ def _could_be_goal(memory):
     x0, x1, y0, y1 = min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1  # one unknown ring around the map
     inside = lambda c: x0 <= c[0] <= x1 and y0 <= c[1] <= y1
     # Clamping any path into this box never makes it longer, so the box doesn't break the at_least bound.
-    at_least = _bfs((0, 0), lambda c: inside(c) and known.get(c) is not False)
-    shortest_known = _bfs((0, 0), lambda c: known.get(c) is True)
+    at_least = _bfs(known, (x0, x1, y0, y1))
+    shortest_known = _bfs(known)
     beat = max(at_least.get(c, 0) for c, v in known.items() if v) - SLACK
 
     cells = {c for c, d in shortest_known.items() if d >= beat and c not in memory["visited"]}
@@ -141,8 +188,7 @@ def _could_be_goal(memory):
             while stack:
                 c = stack.pop()
                 pocket.append(c)
-                for h in range(4):
-                    n = _ahead(c, h)
+                for n in ((c[0], c[1] - 1), (c[0] + 1, c[1]), (c[0], c[1] + 1), (c[0] - 1, c[1])):
                     if not inside(n):
                         open_edge = True  # reaches past everything we know: could be any size
                     elif n in shortest_known:
@@ -155,16 +201,18 @@ def _could_be_goal(memory):
     return cells, unknown, beat, at_least
 
 
-def _route(memory, is_target, value=None, right_first=False):
+def _route(memory, is_target, value=None, right_first=False, value_max=0):
     """Fewest-ticks search from where we are to a state where is_target(cell, heading) holds.
 
     States are (cell, heading) and forward / turn_left / turn_right each cost one tick, so turns are counted
     exactly like the grader counts them. Forward is tried first, so among equally short routes the one that
     turns later -- usually straighter -- wins. When turning left or right from where we stand is equally good,
     right_first decides which one wins (we set it to whichever side looks more open).
-    Without `value`: the nearest target. With it: the target with the lowest (ticks to get there - value).
+    Without `value`: the nearest target. With it: the target with the lowest (ticks to get there - value);
+    value never exceeds value_max, so once (ticks - value_max) can't beat the best found, we can stop searching.
     Returns the list of actions ([] if already there), or None.
     """
+    known = memory["known"]
     start = (memory["pos"], memory["h"])
     came_from = {start: None}
     dist = {start: 0}
@@ -172,6 +220,8 @@ def _route(memory, is_target, value=None, right_first=False):
     best, best_key = None, None
     while queue:
         state = queue.popleft()
+        if best is not None and dist[state] - value_max >= best_key:
+            break  # every state from here on is at least this far away: none can beat the best
         if is_target(*state):
             key = dist[state] - value(*state) if value else 0
             if best is None or key < best_key:
@@ -182,8 +232,9 @@ def _route(memory, is_target, value=None, right_first=False):
         steps = [((cell, (h - 1) % 4), "turn_left"), ((cell, (h + 1) % 4), "turn_right")]
         if state == start and right_first:
             steps.reverse()
-        if _is_open(memory, _ahead(cell, h)):
-            steps.insert(0, ((_ahead(cell, h), h), "forward"))
+        ahead = (cell[0] + DIRS[h][0], cell[1] + DIRS[h][1])
+        if known.get(ahead) is True:
+            steps.insert(0, ((ahead, h), "forward"))
         for nxt, action in steps:
             if nxt not in came_from:
                 came_from[nxt] = (state, action)
@@ -240,44 +291,47 @@ def decide(sensors, memory):
     ------------------------------------------------------------------------
     """
     if not memory:
-        memory.update(pos=(0, 0), h=0, last=None, range=1, votes={}, sure={}, visited=set())
+        memory.update(pos=(0, 0), h=0, last=None, range=1, votes={}, sure={}, known={}, visited=set(), version=0)
 
     _update_pose(sensors, memory)
     _sense(sensors, memory)
-    # for the dev viewer only: the map as it currently stands
-    memory["known"] = {c: _is_open(memory, c) for c in set(memory["votes"]) | set(memory["sure"])
-                       if _is_open(memory, c) is not None}
 
     h, pos = memory["h"], memory["pos"]
     # Targets, in order: a cell we haven't stood on (any could be the goal), or a spot next to a cell we
     # know nothing about (unsensed, or noise left its votes tied). Arriving there senses it.
-    def sees(c, h, doubt=0, among=None):  # standing on c facing h: an uncertain neighbour in front/left/right?
-        return any(d != (h + 2) % 4 for d in _next_to(memory, c, doubt, among))
+    def sees(watch):  # standing on c facing h: is an uncertain neighbour in front/left/right (not behind)?
+        return lambda c, h: any(d != (h + 2) % 4 for d in watch.get(c, ()))
 
-    cells, unknown, beat, at_least = _could_be_goal(memory)
+    if memory.get("cache_version") != memory["version"]:  # recompute only when the map actually changed
+        cells, unknown, beat, at_least = _could_be_goal(memory)
+        memory["cache"] = cells, unknown, beat, at_least, _watchers(memory, among=unknown)
+        memory["cache_version"] = memory["version"]
+    cells, unknown, beat, at_least, watch = memory["cache"]
 
     def depth(c, h):  # how far from the start this target reaches: deeper = likelier to hold the farthest cell
         if c in cells:
             return DEPTH_WEIGHT * at_least.get(c, 0)
-        return DEPTH_WEIGHT * max((at_least.get(_ahead(c, d), 0) for d in _next_to(memory, c, among=unknown)
-                                   if d != (h + 2) % 4), default=0)
+        return DEPTH_WEIGHT * max((at_least.get(_ahead(c, d), 0) for d in watch.get(c, ()) if d != (h + 2) % 4),
+                                  default=0)
 
     memory["ruled_out"] = {c for c, v in memory["known"].items() if v and c not in cells} - memory["visited"]
     doubt = 0
     right_first = sensors["dist_right"] > sensors["dist_left"]
-    actions = _route(memory, lambda c, h: c in cells or sees(c, h, among=unknown), depth if DEPTH_WEIGHT else None,
-                     right_first)
+    in_view = sees(watch)
+    actions = _route(memory, lambda c, h: c in cells or in_view(c, h), depth if DEPTH_WEIGHT else None,
+                     right_first, DEPTH_WEIGHT * max(at_least.values()))
     reason = f"nearest spot that could still be the goal (>= {beat} steps from start)"
     if actions is None:
         # The rule "goal = farthest cell" found nothing left. Maybe noise misled it, maybe the rule doesn't
         # hold in this maze -- either way, fall back to exploring everything.
-        actions = _route(memory, lambda c, h: c not in memory["visited"] or sees(c, h))
+        in_view = sees(_watchers(memory))
+        actions = _route(memory, lambda c, h: c not in memory["visited"] or in_view(c, h))
         reason = "nothing left that fits 'goal = farthest cell' -> nearest unvisited or unsensed spot"
     while actions is None and doubt < 50:
         # Everything reachable is explored and still no goal: noise must have faked a wall somewhere.
         # Re-check the walls we are least sure about; widen the net if that finds nothing.
         doubt = memory["doubt"] = max(doubt + 1, memory.get("doubt", 1))
-        actions = _route(memory, lambda c, h: sees(c, h, doubt))
+        actions = _route(memory, sees(_watchers(memory, doubt)))
         reason = "map explored, no goal -> re-checking a doubtful wall"
     actions = actions or []
     memory["plan"] = _cells_along(memory, actions)

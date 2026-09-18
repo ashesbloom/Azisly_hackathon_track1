@@ -62,6 +62,10 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 5 | prefer deeper targets (W = 0.25) | 370 | 197 (20/20) | 100/100, **89.7, 32.8** | 40/40, 112.4, 41.2 | 44 |
 | 6 | on a tie, turn toward the more open side | **376** | **204** (20/20) | 100/100, 91.8, **34.0** | 40/40, 116.6, **43.6** | 45 |
 | 7 | *tried, reverted:* drop the 3-step margin | 352 | 218 | 99/100, 96.2, 34.1 | 40/40, 116.5, 44.6 | 49 |
+| 8 | *tried, reverted:* other ways to handle tied readings | -- | -- | see entry | -- | -- |
+| 9 | *tuning sweep:* SLACK x W | -- | -- | all within 1% (plateau) | -- | -- |
+| 10 | *tried, reverted:* "goal must be a dead end" rule | 352 | 204 | 99/100, 87.7 | 39/40, 105.1 | 62 |
+| 11 | speed: 5x faster, identical decisions | 376 | 204 | unchanged | unchanged | unchanged |
 
 From #7 on the benchmark also has the farthest-by-ticks set. For #6 it reads: 50/50 solved, 128.3 extra ticks, score 29.9.
 
@@ -298,3 +302,85 @@ The grader runs 3.11+ anyway.
   robot skip cells next to its path that were cheap to grab right then, and later the fallback walked back for them.
   Practice dropped 24 points. The two-definition check also cost more thinking time (slowest tick 120 ms vs ~20).
 - **Verdict:** reverted. `robot.py` is identical to #6.
+
+---
+
+## #8 (tried, reverted) Other ways to handle a tie between "open" and "wall" votes
+
+- **Today:** a tied cell counts as unknown. If it's in view, the robot `wait`s one tick for a fresh reading.
+  That's 2.8% of all ticks on the benchmark.
+- **Tried:**
+  - **A:** don't go out of our way to look at tied cells; leave them to the fallback.
+  - **B:** break a tie with the most recent reading, so there are no ties at all.
+  - **C:** like B, but never drive *into* a cell that is only "open" by a tie-break; wait there instead.
+- **Result** ("bench total" = sum of all 190 benchmark scores):
+
+| variant | hard | bench total | bench wall hits |
+|---|---|---|---|
+| **current** | 204 | 6639 | **54** |
+| A | 100 | -- (far set 30.9 vs 34.0) | 65 |
+| B | 220 | 6680 | 117 |
+| C | 219 | 6594 | 65 |
+
+- **What we learned:**
+  - A is clearly bad: a tied cell is often the only way forward, and leaving it for later means a long walk back.
+  - B and C are within 1% of the current version on the benchmark, which is noise. B doubles the wall hits: it gambles.
+- **Verdict:** kept the current, simplest behaviour.
+
+---
+
+## #9 (tuning sweep) SLACK and DEPTH_WEIGHT together
+
+Re-tuned both knobs after #6, since changes can shift the best setting. Bench total for each:
+
+| SLACK \ W | 0.25 | 0.5 |
+|---|---|---|
+| 2 | 6657 (1 unsolved) | 6676 |
+| **3** | **6639** | 6644 |
+| 4 | 6681 | 6671 |
+| 5 | 6641 | 6601 (1 unsolved) |
+
+Everything lands within 1% with no pattern, so it's a plateau and moving the knobs gains nothing real. Practice (376)
+and hard (204-209) barely move either. **Kept SLACK = 3, W = 0.25.** We don't pick the top number from a noisy table:
+that just tunes to our benchmark's luck, not to the hidden mazes.
+
+---
+
+## #10 (tried, reverted) "The goal must be a dead end"
+
+- **Idea:** all 4 practice goals are dead ends (one open neighbour), and in a perfect maze the farthest cell always is.
+  So once a cell has 2+ known open neighbours, stop treating it as a goal candidate.
+- **Result:** practice 376 -> 352, one extra unsolved maze in the farthest-goal set and one in the random set.
+  Bench total +41 (noise level).
+- **What we learned:** like #7, ruling cells out more aggressively backfires. A goal-shaped rule that holds in
+  perfect mazes breaks in open rooms, where the farthest cell can be a room corner. The benchmark has rooms, and
+  the hidden set is said to have "open chambers".
+- **Verdict:** reverted.
+
+---
+
+## #11 Speed: the same decisions, 5x faster
+
+- **Why this mattered:** a stress test on bigger mazes than the benchmark (61x61) showed the robot needing
+  **31-36 seconds** of thinking for one maze. The final round allows **30 s per maze** (and 10 minutes in total), so
+  a big hidden maze would have scored 0 no matter how well it was solved.
+- **What (profiled first, then fixed the top items):**
+  1. **The map is kept up to date cell by cell** (`_mark`) instead of being rebuilt from all votes every tick.
+  2. **Targets are worked out once per tick** (`_watchers`). Before, the route search re-derived "is there
+     something unknown next to this cell?" for every state it touched: 7.6 million calls on one maze.
+  3. **The route search stops early.** Once no state further away can beat the best target found, it stops.
+  4. **Nothing is recomputed unless the map changed.** A version counter goes up only when a cell's state flips or
+     we stand on a new cell. When backtracking through explored corridors, nothing changes, so the "could be the
+     goal" analysis is reused.
+  5. The two distance searches in `_bfs` no longer call a function per cell.
+- **How we proved nothing changed:** before touching anything we recorded a fingerprint: ticks, wall hits and
+  solved for all 214 runs (190 benchmark + 4 practice + 20 hard). After each step, all 214 were identical.
+- **Result:**
+
+| maze | before | after |
+|---|---|---|
+| 61x61, range 4 | 31.1 s | **5.9 s** |
+| 61x61, range 1, 10% noise | 36.1 s | **6.9 s** |
+| typical benchmark tick | ~2 ms | ~1 ms |
+
+- **Verdict:** kept.
