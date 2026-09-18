@@ -55,6 +55,7 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 0 | wall follower | 282 | 150 | 96/100, 85.2, 30.8 | 32/40, 86.9, 41.8 | 112 |
 | 1 | explorer (nearest unvisited) | 304 | 173 | 98/100, 135.5, 26.5 | 39/40, 101.1, 44.5 | 178 |
 | 2 | noise voting + re-checking uncertain cells | 298 | 167 (20/20 solved) | 98/100, 129.8, 26.1 | 40/40, 105.2, 43.5 | 37 |
+| 3 | turn-aware routing | **370** | 194 (20/20) | **100/100, 102.0**, 26.9 | 39/40, 111.5, 42.4 | 31 |
 
 Use `python3.11`. The macOS system `python3` (3.9, Tk 8.5) freezes any window, including the kit's `play.py`.
 The grader runs 3.11+ anyway.
@@ -174,4 +175,33 @@ The grader runs 3.11+ anyway.
 
     Both point at the real problem: **exploration order**.
   - On range-1 noisy mazes it spends ~55 ticks per maze on `wait`. Worth revisiting later.
+- **Verdict:** kept.
+
+---
+
+## #3 Turn-aware routing: count turns as ticks when choosing where to go
+
+- **What:** the search now plans over **(cell, heading)** instead of just cells. Each of forward, turn left and turn right
+  costs one tick, exactly like the grader counts. So "nearest" now means "fewest ticks away", not "fewest cells away".
+  The search returns the actions themselves, so `decide` just takes the first one. Forward is tried before turns,
+  so among equally short routes it keeps going straight rather than turning early.
+- **Why:** a cell 3 steps ahead costs 3 ticks. A cell 1 step behind costs 3 ticks too (turn, turn, forward). The old
+  search called the one behind "nearest" and happily spun around for it. In a corridor this makes the robot finish
+  what's ahead before doubling back, which is exactly the depth-first behaviour that made the wall follower good on big mazes.
+- **Where:** `_route` (rewritten), `_cells_along` (for the viewer's plan line), `decide`.
+- **Result:**
+
+| suite | before (#2) | after (#3) |
+|---|---|---|
+| practice | 298 | **370** (p02 and p03 now match the shortest possible route: 100 each) |
+| hard: solved / wall hits / score | 20/20, 4, 167 | 20/20, 8, **194** |
+| bench far: solved / extra ticks / score | 98/100, 129.8, 26.1 | **100/100, 102.0**, 26.9 |
+| bench random: solved / extra ticks / score | 40/40, 105.2, 43.5 | 39/40, 111.5, 42.4 |
+
+- **What we learned:**
+  - The biggest single gain so far, and it costs nothing: same information, better arithmetic.
+  - The one failure (rand10033) is a goal 2 cells from the start, in a side pocket, while the explorer went the
+    other way. When the goal is that close, the tick cap is tiny (6 x 14 + 300 = 384). Exploration order again.
+  - Spotted: at the start (t000-t002 of rand10033) it turns left to look behind, then needs two more turns to face
+    the open corridor on the right. Turning right first would have looked behind *and* faced the corridor.
 - **Verdict:** kept.

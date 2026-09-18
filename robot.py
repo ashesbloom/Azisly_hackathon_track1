@@ -87,28 +87,48 @@ def _next_to(memory, cell, doubt=0):
     return out
 
 
-def _route(memory, is_target):
-    """Breadth-first search through believed-open cells to the nearest cell where is_target(cell) holds.
+TURN = {"turn_left": -1, "turn_right": 1}
 
-    Returns the list of cells to walk through (not including where we are), or None.
+
+def _route(memory, is_target):
+    """Fewest-ticks search from where we are to the nearest state where is_target(cell, heading) holds.
+
+    States are (cell, heading) and forward / turn_left / turn_right each cost one tick, so turns are counted
+    exactly like the grader counts them. Forward is tried first, so among equally short routes the one that
+    turns later -- usually straighter -- wins. Returns the list of actions ([] if already there), or None.
     """
-    start = memory["pos"]
+    start = (memory["pos"], memory["h"])
     came_from = {start: None}
     queue = deque([start])
     while queue:
-        cell = queue.popleft()
-        if is_target(cell):
-            path = []
-            while cell != start:
-                path.append(cell)
-                cell = came_from[cell]
-            return path[::-1]
-        for h in range(4):
-            nxt = _ahead(cell, h)
-            if nxt not in came_from and _is_open(memory, nxt):
-                came_from[nxt] = cell
+        state = queue.popleft()
+        if is_target(*state):
+            actions = []
+            while came_from[state]:
+                state, action = came_from[state]
+                actions.append(action)
+            return actions[::-1]
+        cell, h = state
+        steps = [((cell, (h - 1) % 4), "turn_left"), ((cell, (h + 1) % 4), "turn_right")]
+        if _is_open(memory, _ahead(cell, h)):
+            steps.insert(0, ((_ahead(cell, h), h), "forward"))
+        for nxt, action in steps:
+            if nxt not in came_from:
+                came_from[nxt] = (state, action)
                 queue.append(nxt)
     return None
+
+
+def _cells_along(memory, actions):
+    """The cells a list of actions walks through -- for the viewer's plan line."""
+    cell, h, cells = memory["pos"], memory["h"], []
+    for action in actions:
+        if action == "forward":
+            cell = _ahead(cell, h)
+            cells.append(cell)
+        else:
+            h = (h + TURN[action]) % 4
+    return cells
 
 
 def decide(sensors, memory):
@@ -151,37 +171,27 @@ def decide(sensors, memory):
     h, pos = memory["h"], memory["pos"]
     # Targets, in order: a cell we haven't stood on (any could be the goal), or a spot next to a cell we
     # know nothing about (unsensed, or noise left its votes tied). Arriving there senses it.
+    def sees(c, h, doubt=0):  # standing on c facing h, is an uncertain neighbour in front/left/right?
+        return any(d != (h + 2) % 4 for d in _next_to(memory, c, doubt))
+
     doubt = 0
-    path = _route(memory, lambda c: c not in memory["visited"] or _next_to(memory, c))
+    actions = _route(memory, lambda c, h: c not in memory["visited"] or sees(c, h))
     reason = "nearest unvisited or unsensed spot"
-    while path is None and doubt < 50:
+    while actions is None and doubt < 50:
         # Everything reachable is explored and still no goal: noise must have faked a wall somewhere.
         # Re-check the walls we are least sure about; widen the net if that finds nothing.
         doubt = memory["doubt"] = max(doubt + 1, memory.get("doubt", 1))
-        path = _route(memory, lambda c: _next_to(memory, c, doubt))
+        actions = _route(memory, lambda c, h: sees(c, h, doubt))
         reason = "map explored, no goal -> re-checking a doubtful wall"
-    memory["plan"] = path or []
-    if not path:
-        uncertain = _next_to(memory, pos, doubt)
-        if uncertain and (h + 2) % 4 not in uncertain:
-            action = "wait"
-            memory["why"] = "a cell next to us is uncertain -> wait one tick for a fresh reading"
-        else:
-            action = "turn_left"
-            memory["why"] = "the cell behind us is uncertain -> turn left to bring it into view"
+    actions = actions or []
+    memory["plan"] = _cells_along(memory, actions)
+    if not actions:
+        action = "wait"
+        memory["why"] = "a cell in view is uncertain (tied votes) -> wait one tick for a fresh reading"
     else:
-        pos, nxt = memory["pos"], path[0]
-        want = DIRS.index((nxt[0] - pos[0], nxt[1] - pos[1]))
-        target = f"{reason} (ring) is {len(path)} step{'s' if len(path) > 1 else ''} away"
-        if want == h:
-            action = "forward"
-            memory["why"] = f"{target}, next cell is ahead and mapped open -> forward"
-        elif want == (h + 1) % 4:
-            action = "turn_right"
-            memory["why"] = f"{target}, route goes right -> turn right"
-        else:
-            action = "turn_left"
-            memory["why"] = f"{target}, route goes {'left' if want == (h - 1) % 4 else 'back (2 turns)'} -> turn left"
+        action = actions[0]
+        n = len(actions)
+        memory["why"] = f"{reason} (ring) is {n} tick{'s' if n > 1 else ''} away, counting turns -> {action}"
 
     memory["last"] = action
     return action
