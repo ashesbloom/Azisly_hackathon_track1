@@ -155,12 +155,13 @@ def _could_be_goal(memory):
     return cells, unknown, beat, at_least
 
 
-def _route(memory, is_target, value=None):
+def _route(memory, is_target, value=None, right_first=False):
     """Fewest-ticks search from where we are to a state where is_target(cell, heading) holds.
 
     States are (cell, heading) and forward / turn_left / turn_right each cost one tick, so turns are counted
     exactly like the grader counts them. Forward is tried first, so among equally short routes the one that
-    turns later -- usually straighter -- wins.
+    turns later -- usually straighter -- wins. When turning left or right from where we stand is equally good,
+    right_first decides which one wins (we set it to whichever side looks more open).
     Without `value`: the nearest target. With it: the target with the lowest (ticks to get there - value).
     Returns the list of actions ([] if already there), or None.
     """
@@ -179,6 +180,8 @@ def _route(memory, is_target, value=None):
                 break
         cell, h = state
         steps = [((cell, (h - 1) % 4), "turn_left"), ((cell, (h + 1) % 4), "turn_right")]
+        if state == start and right_first:
+            steps.reverse()
         if _is_open(memory, _ahead(cell, h)):
             steps.insert(0, ((_ahead(cell, h), h), "forward"))
         for nxt, action in steps:
@@ -261,7 +264,9 @@ def decide(sensors, memory):
 
     memory["ruled_out"] = {c for c, v in memory["known"].items() if v and c not in cells} - memory["visited"]
     doubt = 0
-    actions = _route(memory, lambda c, h: c in cells or sees(c, h, among=unknown), depth if DEPTH_WEIGHT else None)
+    right_first = sensors["dist_right"] > sensors["dist_left"]
+    actions = _route(memory, lambda c, h: c in cells or sees(c, h, among=unknown), depth if DEPTH_WEIGHT else None,
+                     right_first)
     reason = f"nearest spot that could still be the goal (>= {beat} steps from start)"
     if actions is None:
         # The rule "goal = farthest cell" found nothing left. Maybe noise misled it, maybe the rule doesn't

@@ -58,6 +58,7 @@ python3.11 selftest.py robot.py             # submission plumbing check -- run b
 | 3 | turn-aware routing | **370** | 194 (20/20) | **100/100, 102.0**, 26.9 | 39/40, 111.5, 42.4 | 31 |
 | 4 | skip cells that can't be the goal (farthest-cell rule) | 370 | 187 (20/20) | 100/100, 95.6, 27.6 | 38/40, 98.3, 42.5 | 36 |
 | 5 | prefer deeper targets (W = 0.25) | 370 | 197 (20/20) | 100/100, **89.7, 32.8** | 40/40, 112.4, 41.2 | 44 |
+| 6 | on a tie, turn toward the more open side | **376** | **204** (20/20) | 100/100, 91.8, **34.0** | 40/40, 116.6, **43.6** | 45 |
 
 Use `python3.11`. The macOS system `python3` (3.9, Tk 8.5) freezes any window, including the kit's `play.py`.
 The grader runs 3.11+ anyway.
@@ -256,3 +257,18 @@ The grader runs 3.11+ anyway.
   things behind that it has to walk back for. 0.25 and 0.5 are about the same on the farthest-goal set. 0.25 wastes
   less when the goal isn't far, which is our insurance if the hidden mazes don't follow the rule.
 - **Verdict:** kept with W = 0.25.
+
+---
+
+## #6 When two turns are equally good, turn toward the more open side
+
+- **What:** when the best plan starts with a turn and turning left or right would be equally good, turn toward the
+  side whose distance sensor reads farther. Before, it always picked left.
+- **Why:** seen on p04 (t000-t002). The robot starts facing a wall with an unknown cell behind it. Turning either
+  way brings that cell into view, so both cost 1 tick. It picked left (a wall), then needed 2 more turns to face the
+  open corridor on the right. Turning right first looks behind *and* ends up facing the way we'll go.
+- **Where:** `_route(right_first=...)`, set in `decide` from `dist_right > dist_left`.
+- **Result:** practice 370 -> 376 (p01 45 -> 43, p04 65 -> 64). Hard 197 -> 204. Bench scores 32.8 -> 34.0 and
+  41.2 -> 43.6, though farthest-goal extra ticks moved 89.7 -> 91.8. That's within the benchmark's noise: a tiny change
+  early in a run changes everything after it, sometimes for the better and sometimes worse.
+- **Verdict:** kept. Free, and it helps where it's aimed.
