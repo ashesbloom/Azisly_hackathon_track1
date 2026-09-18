@@ -85,9 +85,10 @@ The grader runs 3.11+ anyway.
 | **total** | **20/20 -> 17/20** | **19 -> 70** | **150 -> 173** |
 
 - **What we learned:**
-  - p01 got worse (100 -> 80). The explorer goes to whatever unvisited cell is *nearest*, which sent it into a side corridor
-    the wall follower happened to skip. With a hidden goal, "nearest" isn't always best. It also turns more,
-    because its search ignores that turns cost ticks.
+  - p01 got worse (100 -> 80). At (3,7) the bottom corridor goes both ways. "Nearest unvisited" happened to pick east:
+    a 4-cell dead end (x=4..7), then two turns and back = 10 wasted ticks. The goal was west. The wall follower
+    wasn't smarter -- its right-hand rule just happened to turn the right way on this maze. With a hidden goal,
+    every fork is a guess; what we can control is how cheaply a wrong guess gets undone.
   - **Noise breaks it.** Because the newest reading wins, one wrong reading ("1 open cell ahead" where there's a wall) makes it
     drive into a wall (seen at `--text` on p03 with range 1, tick 10). Another wrong reading can hide an open cell and strand it.
     3 of 20 hard runs never reached the goal = 0 points each. The wall follower is dumber but never stranded.
