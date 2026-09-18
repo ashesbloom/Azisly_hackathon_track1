@@ -12,6 +12,72 @@ Read CONTRACT.md first. It is short and it is the whole ruleset.
 
 import json
 import sys
+from collections import deque
+
+# Headings in the robot's own frame: 0 = N, 1 = E, 2 = S, 3 = W, y grows down.
+# The robot never learns its true heading; "N" just means "the way it faced at the start".
+DIRS = ((0, -1), (1, 0), (0, 1), (-1, 0))
+
+
+def _ahead(cell, h, n=1):
+    return cell[0] + DIRS[h][0] * n, cell[1] + DIRS[h][1] * n
+
+
+def _update_pose(sensors, memory):
+    """Apply what the previous action actually did. Moves are exact, so only a wall hit can surprise us."""
+    last = memory["last"]
+    if last == "turn_left":
+        memory["h"] = (memory["h"] - 1) % 4
+    elif last == "turn_right":
+        memory["h"] = (memory["h"] + 1) % 4
+    elif last == "forward":
+        # Moving wheels read 120 +-5; a stalled wheel reads exactly 0. 60 splits them with a big margin.
+        if sensors["rpm_left"] > 60 and sensors["rpm_right"] > 60:
+            memory["pos"] = _ahead(memory["pos"], memory["h"])
+        else:
+            memory["known"][_ahead(memory["pos"], memory["h"])] = False  # we hit it: it's a wall
+    memory["visited"].add(memory["pos"])
+
+
+def _sense(sensors, memory):
+    """Write this tick's front/left/right readings into the map. The latest reading wins."""
+    pos, h, known = memory["pos"], memory["h"], memory["known"]
+    readings = ((sensors["dist_front"], h), (sensors["dist_left"], (h - 1) % 4),
+                (sensors["dist_right"], (h + 1) % 4))
+    # A reading equal to the sensor range means "at least that far", so it tells us nothing about the
+    # next cell. We aren't told the range; the largest reading seen so far is a safe lower bound.
+    memory["range"] = max(memory["range"], *(d for d, _ in readings))
+    for d, dh in readings:
+        for i in range(1, d + 1):
+            known[_ahead(pos, dh, i)] = True
+        wall = _ahead(pos, dh, d + 1)
+        if d < memory["range"] and wall not in memory["visited"]:  # never un-open a cell we stood on
+            known[wall] = False
+
+
+def _route(memory):
+    """Breadth-first search through believed-open cells to the nearest cell we haven't stood on.
+
+    Returns the list of cells to walk through (not including where we are), or None.
+    Every unvisited open cell could be the goal -- we only find out by standing on it.
+    """
+    start, known, visited = memory["pos"], memory["known"], memory["visited"]
+    came_from = {start: None}
+    queue = deque([start])
+    while queue:
+        cell = queue.popleft()
+        if cell not in visited:
+            path = []
+            while cell != start:
+                path.append(cell)
+                cell = came_from[cell]
+            return path[::-1]
+        for h in range(4):
+            nxt = _ahead(cell, h)
+            if nxt not in came_from and known.get(nxt):
+                came_from[nxt] = cell
+                queue.append(nxt)
+    return None
 
 
 def decide(sensors, memory):
@@ -34,56 +100,44 @@ def decide(sensors, memory):
     Returns one of: "forward", "turn_left", "turn_right", "wait"
 
     ------------------------------------------------------------------------
-    What is below is a RIGHT-HAND WALL FOLLOWER. It works: it will solve the
-    early mazes. It is deliberately not good enough to win, because it has no
-    memory -- it never learns the maze, so it walks the same long way round
-    every time and it can loop forever in an open room.
+    Strategy (see "for dev/OPTIMIZATIONS.md" for the history and the why):
+    track our own position, map every wall we sense, and always walk to the
+    nearest cell we have not stood on yet -- any of them could be the goal.
 
-    Your job is to do better. Some directions worth taking:
-
-      1. Track where you are. The wheels tell you what you actually did:
-         both wheels near +120 means you advanced one cell; wheels
-         counter-rotating means you turned 90 degrees. Keep (x, y, heading)
-         in memory and update it every tick.
-
-      2. Build a map. Once you know where you are, record the walls you
-         sense into memory. Now you know which parts of the maze you have
-         not explored yet.
-
-      3. Route with what you know. With a map, you can flood-fill or BFS to
-         the nearest unexplored cell instead of wandering, and once you have
-         found the goal you know the short way back.
-
-      4. Handle the nasty mazes. On the hardest ones you only feel adjacent
-         walls, distance readings are occasionally wrong by one, and the
-         wheel encoders wobble by about 5. Compare RPM with a tolerance, not
-         with ==, and consider ignoring a single odd sensor reading rather
-         than trusting it immediately.
-
-    Scoring, briefly: reaching the goal is worth far more than reaching it
-    quickly, and every wall you hit costs you 5 points plus a wasted tick.
-    Get it solving first. Optimise second.
+    memory keys also read by the dev viewer (the grader ignores them):
+        why (str), plan (list of cells), known ({cell: open?}), visited (set)
     ------------------------------------------------------------------------
     """
-    # --- example strategy: right-hand wall follower --- replace this ---
+    if not memory:
+        memory.update(pos=(0, 0), h=0, last=None, range=1, known={(0, 0): True}, visited=set())
 
-    # Don't turn right twice in a row: after turning into an opening we want to
-    # actually drive into it before looking right again.
-    turned_right_last_tick = memory.get("turned_right", False)
-    memory["turned_right"] = False
+    _update_pose(sensors, memory)
+    _sense(sensors, memory)
 
-    if sensors["dist_right"] > 0 and not turned_right_last_tick:
-        memory["turned_right"] = True
-        memory["why"] = "right side open -> turn right (right-hand rule)"
-        return "turn_right"
+    path = _route(memory)
+    memory["plan"] = path or []
+    h = memory["h"]
+    if not path:
+        # Nothing reachable we haven't stood on. Usually the cell behind the start was never sensed;
+        # turning brings it into the side sensors.
+        action = "turn_left"
+        memory["why"] = "no known unvisited cell reachable -> turn left to sense what's behind"
+    else:
+        pos, nxt = memory["pos"], path[0]
+        want = DIRS.index((nxt[0] - pos[0], nxt[1] - pos[1]))
+        target = f"nearest unvisited cell (ring) is {len(path)} step{'s' if len(path) > 1 else ''} away"
+        if want == h:
+            action = "forward"
+            memory["why"] = f"{target}, next cell is ahead and mapped open -> forward"
+        elif want == (h + 1) % 4:
+            action = "turn_right"
+            memory["why"] = f"{target}, route goes right -> turn right"
+        else:
+            action = "turn_left"
+            memory["why"] = f"{target}, route goes {'left' if want == (h - 1) % 4 else 'back (2 turns)'} -> turn left"
 
-    if sensors["dist_front"] > 0:
-        memory["why"] = ("just turned right, so drive into the opening" if turned_right_last_tick
-                         else "right is a wall, front is open -> keep following the wall")
-        return "forward"
-
-    memory["why"] = "right and front blocked -> turn left"
-    return "turn_left"
+    memory["last"] = action
+    return action
 
 
 # =============================================================================

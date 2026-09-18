@@ -4,6 +4,7 @@ Dev viewer for the maze robot. NOT part of the submission -- only robot.py is up
     python3.11 "for dev/viz.py"               # GUI: step through a run, hover anything for help
     python3.11 "for dev/viz.py" --text        # score table for every practice maze
     python3.11 "for dev/viz.py" --text p02    # tick-by-tick log for one maze
+    python3.11 "for dev/viz.py" --hard        # same mazes with worst-case sensors (range 1, noise, jitter)
     python3.11 "for dev/viz.py" team17.py --text # test a different robot file
 
 Use python3.11: the macOS system python3 (Tk 8.5) freezes any window.
@@ -174,6 +175,22 @@ def text_line(f):
     return (f"t{f['tick']:03d} ({f['x']},{f['y']}){f['heading']} "
             f"F{p['dist_front']} L{p['dist_left']} R{p['dist_right']} "
             f"{(f['action'] or '-'):<10}| {f['why']}{hit}")
+
+
+def hard_mode(robot_path, seeds=5):
+    """Practice mazes re-run with the hidden set's worst sensors: range 1, 10% noise, jitter, several noise seeds."""
+    import dataclasses
+    print(f"{'maze':<6}{'solved':>8}{'avg ticks':>11}{'shortest':>10}{'wall hits':>11}{'avg score':>11}")
+    total = 0
+    for p in maze_files():
+        m = S.load_maze(p)
+        runs = [simulate(robot_path, dataclasses.replace(m, sensor_range=1, noise=0.10, encoder_jitter=True,
+                                                         seed=m.seed + k)) for k in range(seeds)]
+        avg = sum(r["score"] for r in runs) / seeds
+        total += avg
+        print(f"{m.name:<6}{sum(r['solved'] for r in runs):>6}/{seeds}{sum(r['ticks'] for r in runs) / seeds:>11.0f}"
+              f"{runs[0]['best']:>10}{sum(r['hits'] for r in runs):>11}{avg:>11.0f}")
+    print(f"{'TOTAL':<46}{total:>11.0f} / {100 * len(maze_files())}")
 
 
 def text_mode(robot_path, which):
@@ -469,8 +486,13 @@ def main():
     ap.add_argument("robot", nargs="?", default=str(KIT / "robot.py"), help="robot file (default robot.py)")
     ap.add_argument("--text", nargs="?", const="ALL", metavar="MAZE",
                     help="no GUI: score table for all mazes, or a tick-by-tick log for one maze")
+    ap.add_argument("--hard", action="store_true",
+                    help="no GUI: practice mazes with range-1 sensors, 10%% noise and jitter, 5 noise seeds each")
     args = ap.parse_args()
     robot_path = Path(args.robot).resolve()
+    if args.hard:
+        hard_mode(robot_path)
+        return
     if args.text:
         text_mode(robot_path, args.text)
         return

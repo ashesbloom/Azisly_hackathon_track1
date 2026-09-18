@@ -46,3 +46,49 @@ The grader runs 3.11+ anyway.
 
 - **Verdict:** this is the number to beat. Note that p01 and p04 are already (nearly) optimal *by luck*: the right-hand wall happens
   to lead straight to the goal there. A smarter explorer can lose points on those mazes, so always compare the whole table.
+
+---
+
+## #1 "Just working" explorer: remember the maze, go to the nearest unvisited cell
+
+- **What:** replaced the wall follower with a robot that keeps a map.
+  1. **Position (`_update_pose`)**: we know what we commanded, so we track `(x, y, heading)` ourselves from start = (0,0) facing "N".
+     After a `forward`, if both wheels read above 60 we moved. Otherwise we hit a wall, so we stay put and mark that cell as a wall.
+     Why 60: moving wheels read 120 +-5, a stalled wheel reads exactly 0, so 60 can't be confused even with jitter.
+  2. **Map (`_sense`)**: each reading `d` marks the `d` cells in that direction open, and the cell after them a wall,
+     unless `d` equals the sensor range ("at least d" -- we can't tell). We aren't told the range, so we use the largest
+     reading seen so far, which can never be too big. A cell we've stood on is never marked a wall.
+     The newest reading of a cell overwrites the old one.
+  3. **Decision (`_route`)**: breadth-first search through cells we believe are open, to the nearest cell we haven't stood on.
+     Any of them could be the goal, and the only way to find out is to stand on it. Then turn toward the first step or drive.
+     If nothing is reachable, turn left to sense the cell behind us.
+- **Why it should help:** no more walking the same corridors or circling loops (p02), and it only drives into cells its map says are open.
+- **Where:** `_update_pose`, `_sense`, `_route`, `decide` in `robot.py`.
+- **Result, practice mazes** (`--text`):
+
+| maze | ticks before -> after | shortest | wall hits | score before -> after |
+|---|---|---|---|---|
+| p01 | 33 -> 43 | 33 | 0 | 100 -> 80 |
+| p02 | 112 -> 88 | 66 | 0 | 10 -> 56 |
+| p03 | 94 -> 96 | 82 | 0 | 76 -> 72 |
+| p04 | 64 -> 64 | 62 | 0 | 96 -> 96 |
+| **total** | | | | **282 -> 304** |
+
+- **Result, worst-case sensors** (`--hard`: range 1, 10% noise, jitter, 5 noise seeds per maze, average score):
+
+| maze | solved before -> after | wall hits before -> after | avg score before -> after |
+|---|---|---|---|
+| p01 | 5/5 -> 5/5 | 0 -> 0 | 56 -> 57 |
+| p02 | 5/5 -> 4/5 | 6 -> 18 | 10 -> 15 |
+| p03 | 5/5 -> 3/5 | 8 -> 50 | 37 -> 22 |
+| p04 | 5/5 -> 5/5 | 5 -> 2 | 47 -> 80 |
+| **total** | **20/20 -> 17/20** | **19 -> 70** | **150 -> 173** |
+
+- **What we learned:**
+  - p01 got worse (100 -> 80). The explorer goes to whatever unvisited cell is *nearest*, which sent it into a side corridor
+    the wall follower happened to skip. With a hidden goal, "nearest" isn't always best. It also turns more,
+    because its search ignores that turns cost ticks.
+  - **Noise breaks it.** Because the newest reading wins, one wrong reading ("1 open cell ahead" where there's a wall) makes it
+    drive into a wall (seen at `--text` on p03 with range 1, tick 10). Another wrong reading can hide an open cell and strand it.
+    3 of 20 hard runs never reached the goal = 0 points each. The wall follower is dumber but never stranded.
+- **Verdict:** kept as the base. Higher total, but it is **not yet safe on noisy mazes**. That's the first thing to fix.
