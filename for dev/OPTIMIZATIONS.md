@@ -488,3 +488,16 @@ and the safety net covers the rest).
   more than 0.6%.
 - **Verdict:** kept, for correctness. The log's claim that ruled-out cells "provably can't be the goal" is now true
   (given a correct map).
+
+---
+
+## Viewer note (not a robot change -- scores unchanged: practice 376, hard 206)
+
+far0 looked like a regression in the GUI, but it was a misreading:
+- `far0`...`far8` in the dropdown are the **worst 6 of the 190 `--bench` mazes**, saved on purpose to replay.
+  They use the hardest sensors (range 1, 10% noise). far0 is solved in 395 ticks against a best of 59, which
+  scores the floor of 10. That is a known hard case, not a failure. The dropdown now tags them "(bench worst case)",
+  and the result line shows "(hard sensors: ...)".
+- decide() time now reads in ms next to the limit ("0.39 ms (limit 500 ms)"), instead of "393 microseconds",
+  which sounded slow.
+- On the last frame, decide() time now says "not called (run over)" instead of "0".

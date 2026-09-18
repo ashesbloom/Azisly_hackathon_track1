@@ -189,7 +189,10 @@ def simulate(robot_path, maze, record=True):
 
 
 def fmt_ms(ms):
-    return f"{ms * 1000:.0f} microseconds" if ms < 1 else f"{ms:.1f} ms"
+    return f"{ms:.2f} ms"
+
+
+DEV_TAG = "  (bench worst case)"
 
 
 def maze_files(include_dev=False):
@@ -350,7 +353,10 @@ def text_mode(robot_path, which):
 # ----------------------------------------------------------------------------- GUI
 
 TIPS = {
-    "maze": "Practice maze to run. Files live in mazes/. The robot never sees these files -- only sensor readings.",
+    "maze": "Maze to run. p01-p04 are the practice mazes in mazes/. Entries marked 'bench worst case' are the "
+            "lowest-scoring of the generated --bench mazes (hardest sensors: range 1, 10% noise), saved in "
+            "'for dev/mazes/' so you can replay them -- low scores there are expected. The robot never sees "
+            "these files -- only sensor readings.",
     "run": "Run your robot on this maze from the start, in-process, with the final-round limits.",
     "result": "SOLVED = reached the goal. Otherwise why it stopped: tick cap, crash, or illegal action.",
     "ticks": "How many actions your robot took. One action = one tick; turns cost a tick just like moves.",
@@ -438,8 +444,9 @@ class Viewer:
         top = tk.Frame(root, padx=8, pady=6)
         top.pack(fill="x")
         self.maze_var = tk.StringVar(value=maze_files()[0].name)
-        box = ttk.Combobox(top, textvariable=self.maze_var, state="readonly", width=10,
-                           values=[p.name for p in maze_files(True)])
+        box = ttk.Combobox(top, textvariable=self.maze_var, state="readonly", width=24,
+                           values=[p.name for p in maze_files()] +
+                                  [p.name + DEV_TAG for p in maze_files(True)[len(maze_files()):]])
         box.pack(side="left")
         Tip(box, TIPS["maze"])
         run = tk.Button(top, text="Run", command=self.run)
@@ -524,11 +531,12 @@ class Viewer:
     def run(self):
         self.playing = False
         self.play_btn.config(text="Play")
-        r = simulate(self.robot_path, S.load_maze(resolve_maze(self.maze_var.get())))
+        r = simulate(self.robot_path, S.load_maze(resolve_maze(self.maze_var.get().replace(DEV_TAG, ""))))
         self.run_result, self.frames = r, r["frames"]
         m = r["maze"]
         ok = r["solved"]
-        self.result["result"].config(text="SOLVED" if ok else "NOT SOLVED: " + (r["problem"] or "").split(":")[0] + " (see Why)",
+        hard = f"  (hard sensors: range {m.sensor_range}, noise {m.noise:.0%})" if m.noise or m.sensor_range == 1 else ""
+        self.result["result"].config(text=("SOLVED" if ok else "NOT SOLVED: " + (r["problem"] or "").split(":")[0] + " (see Why)") + hard,
                                      fg="#2b8a3e" if ok else HIT)
         self.result["ticks"].config(text=f"Your ticks: {r['ticks']}")
         self.result["best"].config(text=f"Shortest possible: {r['best']}")
@@ -640,7 +648,9 @@ class Viewer:
                                          f"right {p['dist_right']}")
         self.side["wheels"].config(text=f"left {p['rpm_left']:+d}   right {p['rpm_right']:+d}")
         self.side["hits_now"].config(text=str(f["hits"]))
-        self.side["ms"].config(text=fmt_ms(f["ms"]), fg=HIT if f["ms"] > TICK_LIMIT_MS else self.fg)
+        self.side["ms"].config(text="not called (run over)" if f["action"] is None
+                               else f"{fmt_ms(f['ms'])}  (limit {TICK_LIMIT_MS} ms)",
+                               fg=HIT if f["ms"] > TICK_LIMIT_MS else self.fg)
 
 
 def main():
